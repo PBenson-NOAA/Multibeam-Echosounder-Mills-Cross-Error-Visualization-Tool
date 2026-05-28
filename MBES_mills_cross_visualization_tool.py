@@ -104,7 +104,7 @@ def get_sector_steering(sector_center_angle):
             outer_edge_deg = max(abs(s_start), abs(s_end))
             break
 
-    max_allowable_steer = max(0.0, 90.0 - outer_edge_deg - 1.0)
+    max_allowable_steer = max(0.0, 90.0 - outer_edge_deg - (tx_beamwidth / 2.0))
 
     steer_deg = np.clip(steer_deg, -max_allowable_steer, max_allowable_steer)
 
