@@ -83,7 +83,6 @@ def get_sector_steering(sector_center_angle):
     """Calculates the unique pitch and yaw steering required for a specific sector"""
     if auto_pitch:
         # Optimal pitch steering changes based on the across-track angle
-        # Math: sin(steer) = sin(-pitch) * cos(sector_angle)
         pitch_comp_rad = np.arcsin(np.sin(np.radians(-imu_pitch)) * np.cos(np.radians(sector_center_angle)))
         steer_deg = np.degrees(pitch_comp_rad)
 
@@ -96,6 +95,18 @@ def get_sector_steering(sector_center_angle):
         # Yaw steering math
         yaw_comp_rad = np.arctan(np.tan(np.radians(sector_center_angle)) * np.sin(np.radians(imu_yaw)))
         steer_deg += np.degrees(yaw_comp_rad)
+
+    # This is an attempt to "intelligently" restrict transmit to region within RX listening area. Likely a gross over-simplification of what is actually done.
+    # Maybe remove this since it could just add confusion?
+    outer_edge_deg = 0.0
+    for s_start, s_end in sector_limits:
+        if s_start <= sector_center_angle <= s_end:
+            outer_edge_deg = max(abs(s_start), abs(s_end))
+            break
+
+    max_allowable_steer = max(0.0, 90.0 - outer_edge_deg - 1.0)
+
+    steer_deg = np.clip(steer_deg, -max_allowable_steer, max_allowable_steer)
 
     return np.radians(steer_deg)
 
