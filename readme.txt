@@ -11,4 +11,4 @@ theoretical impacts of array orientation misalignments, as well as the responses
 multiple sectors, pitch/roll/yaw stabilization, and vessel motion.
 
 Much of the UI was created with assistance from Gemini, and the mathematical basis was sourced from lecture materials from the 
-Integrated Seabed Mapping Systems course delivered by John Hughes Clarke at the University of New Hampshire.
+Integrated Seabed Mapping Systems course and established literature written by John Hughes Clarke.
