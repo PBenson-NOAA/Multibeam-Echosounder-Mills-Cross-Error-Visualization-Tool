@@ -313,8 +313,7 @@ if np.linalg.norm(pt_physical) > 0:
 
     # TX Check
     v_local_tx = np.dot(R_tx_mech.T, v_pt_phys)
-    # Use arctan2 on the local Y and Z components to find the angle relative to the array's face normal
-    actual_tx_across_angle = np.degrees(np.arctan2(v_local_tx[1], v_local_tx[2]))
+    actual_tx_across_angle = np.degrees(np.arcsin(np.clip(v_local_tx[1], -1.0, 1.0)))
     tx_status = "Yes" if abs(actual_tx_across_angle) <= (tx_across_fan_bw / 2.0) else ":red[No]"
 else:
     rx_status = "Invalid"
