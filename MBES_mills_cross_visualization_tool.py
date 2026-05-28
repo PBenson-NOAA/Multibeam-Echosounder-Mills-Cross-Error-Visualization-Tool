@@ -344,15 +344,15 @@ show_rx_red = t_col4.checkbox("RX Footprint", value=True)
 show_ideal_soundings = t_col5.checkbox("Ideal Soundings (100 beams)", value=False)
 show_actual_soundings = t_col6.checkbox("Actual Soundings (100 beams)", value=False)
 
-# --- Equidistant beam math (100 beams for simplicity)
+# --- Equidistant beam math (100 beams for simplicity) ---
 ideal_sounding_dots = []
 actual_sounding_dots = []
 
 if show_ideal_soundings or show_actual_soundings:
-    # 1. Establish the global target horizontal footprint bounds at 75 degrees
+    # Establish the global target horizontal footprint bounds at 75 degrees
     max_y = depth * np.tan(np.radians(75.0))
 
-    # 2. Create a perfectly uniform, linear grid of 100 target Y coordinates across the whole swath
+    # Create a uniform, linear grid of 100 target Y coordinates across the swath
     beam_y_coords = np.linspace(-max_y, max_y, 100)
 
     for y_coord in beam_y_coords:
@@ -368,18 +368,17 @@ if show_ideal_soundings or show_actual_soundings:
         # Get the steering angle command for this specific sector panel
         steer_rad = get_sector_steering(sector_center)
 
-        # GLOBAL EQUIDISTANT CORRECTION: Account for the conical beam projection (secant effect)
-        # This dynamically scales the receive angle so the soundings form a flawless linear grid
+        # Account for the conical beam projection. Dynamically scales the receive angle so the soundings form a linear grid
         sin_nominal = y_coord / np.sqrt(depth ** 2 + y_coord ** 2)
         b_rad = np.arcsin(np.clip(sin_nominal * np.cos(steer_rad), -1.0, 1.0))
 
-        # --- 1. IDEAL BOUNDARY SOUNDING POINTS ---
+        # Ideal Soundings
         if show_ideal_soundings:
             pt_id = solve_mills_cross_intersection(R_tx_ideal, R_rx_ideal, steer_rad, b_rad, depth)
             if np.linalg.norm(pt_id) > 0:
                 ideal_sounding_dots.append(pt_id)
 
-        # --- 2. ACTUAL HARDWARE SOUNDING POINTS ---
+        # Actual Soundings
         if show_actual_soundings:
             pt_ac = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, steer_rad, b_rad, depth)
             if np.linalg.norm(pt_ac) > 0:
@@ -388,7 +387,7 @@ if show_ideal_soundings or show_actual_soundings:
 # --- 3D VISUALIZATION ---
 fig = go.Figure()
 
-# Add Ideal TX Footprint (Alternating blue shades)
+# Add Ideal TX Footprint
 if show_ideal_tx:
     ideal_colors = ['blue', 'deepskyblue']
     for idx, sector_pts in enumerate(calculated_tx_sectors):
@@ -402,7 +401,7 @@ if show_ideal_tx:
             showlegend=(idx == 0)
         ))
 
-# Add Actual TX Footprint (Alternating Orange Shades)
+# Add Actual TX Footprint
 if show_actual_tx:
     actual_colors = ['darkorange', 'gold']
     for idx, sector_pts in enumerate(physical_tx_sectors):
