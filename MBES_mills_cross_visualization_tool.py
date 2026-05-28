@@ -347,7 +347,7 @@ st.markdown("---")
 st.subheader("Visualization Overlays")
 
 # condense toggles to left side of screen
-t_col1, t_col2, t_col3, t_col4, t_col5, t_col6, spacer = st.columns([1.0, 1.0, 1.0, 1.0, 1.5, 1.5, 9.0])
+t_col1, t_col2, t_col3, t_col4, t_col5, t_col6, spacer = st.columns([1.5, 1.5, 1.2, 1.2, 2.0, 2.0, 3.0])
 
 show_ideal_tx = t_col1.checkbox("Ideal TX Sectors", value=True)
 show_actual_tx = t_col2.checkbox("Actual TX Sectors", value=True)
