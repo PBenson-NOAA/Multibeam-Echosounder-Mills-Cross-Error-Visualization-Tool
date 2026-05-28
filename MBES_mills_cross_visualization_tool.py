@@ -24,6 +24,8 @@ with st.sidebar.expander("Environment & Array Specs", expanded=True):
     rx_beamwidth = c2.number_input("RX BW (°)", value=1.0, step=0.1)
     rx_fore_aft_bw = st.number_input("RX Fore-Aft Acceptance (°)", value=30.0, step=1.0)
     tx_across_fan_bw = st.number_input("TX Across-Track Fan Limit (°)", value=150.0, step=1.0)
+    target_swath_width = st.number_input("Target Swath Coverage (°)", min_value=10.0, max_value=150.0, value=120.0,
+                                         step=1.0)
     num_sectors = st.selectbox("Number of TX Sectors", options=[1, 2, 3, 4, 5, 8], index=2)
 
 # Dynamic Motion
@@ -104,7 +106,7 @@ def get_sector_steering(sector_center_angle):
             outer_edge_deg = max(abs(s_start), abs(s_end))
             break
 
-    max_allowable_steer = max(0.0, 90.0 - outer_edge_deg - (tx_beamwidth / 2.0))
+    max_allowable_steer = max(0.0, 90.0 - outer_edge_deg -(tx_beamwidth / 2.0))
 
     steer_deg = np.clip(steer_deg, -max_allowable_steer, max_allowable_steer)
 
@@ -359,10 +361,10 @@ ideal_sounding_dots = []
 actual_sounding_dots = []
 
 if show_ideal_soundings or show_actual_soundings:
-    # Establish the global target horizontal footprint bounds at 75 degrees
-    max_y = depth * np.tan(np.radians(75.0))
+    per_side_target = target_swath_width / 2.0
+    max_y = depth * np.tan(np.radians(per_side_target))
 
-    # Create a uniform, linear grid of 100 target Y coordinates across the swath
+    # Create 100 target coordinates
     beam_y_coords = np.linspace(-max_y, max_y, 100)
 
     for y_coord in beam_y_coords:
@@ -378,9 +380,24 @@ if show_ideal_soundings or show_actual_soundings:
         # Get the steering angle command for this specific sector panel
         steer_rad = get_sector_steering(sector_center)
 
-        # Account for the conical beam projection. Dynamically scales the receive angle so the soundings form a linear grid
-        sin_nominal = y_coord / np.sqrt(depth ** 2 + y_coord ** 2)
-        b_rad = np.arcsin(np.clip(sin_nominal * np.cos(steer_rad), -1.0, 1.0))
+        # Back projection and swath truncation
+        # Define 3D target coordinate on the flat seafloor
+        v_target_global = np.array([depth * np.tan(steer_rad), y_coord, depth])
+
+        # Push global target backwards into the array's local frame
+        if auto_roll:
+            v_target_local = np.dot(R_rx_ideal.T, v_target_global)
+        else:
+            v_target_local = v_target_global
+
+        # Calculate electronic receive angle needed to hit local coordinate
+        b_rad = np.arcsin(np.clip(v_target_local[1] / np.linalg.norm(v_target_local), -1.0, 1.0))
+
+        max_rx_hardware_angle = 75.0
+
+        # Drop beam to dynamically truncate the swath if exceeded
+        if abs(np.degrees(b_rad)) > max_rx_hardware_angle:
+            continue
 
         # Ideal Soundings
         if show_ideal_soundings:
@@ -460,20 +477,23 @@ fig.add_trace(go.Scatter3d(x=[pt_physical[0]], y=[pt_physical[1]], z=[pt_physica
                            marker=dict(color='red', size=6), name='Actual Sounding'))
 
 # --- VISUAL ANGLE REFERENCE GRID (Dynamic Protractor following IMU Yaw) ---
-ref_angles = np.arange(-75, 76, 15)  # Label every 15 degrees
+ref_angles = np.linspace(-75, 75, 11, dtype=int)  # Label every 15 degrees
 lbl_x, lbl_y, lbl_z, lbl_text = [], [], [], []
 
-# Convert IMU Yaw to radians for rotation math
-grid_yaw_rad = np.radians(imu_yaw)
-
-# Draw the transparent radial lines one-by-one to bypass WebGL bugs
 for i, ang in enumerate(ref_angles):
-    # Calculate the base Y position as if yaw was 0
-    y_base = depth * np.tan(np.radians(ang))
+    # Create the nominal 3D pointing vector for this angle
+    v_ray = np.array([0, np.sin(np.radians(ang)), np.cos(np.radians(ang))])
 
-    # Apply Z-axis rotation to follow IMU heading
-    x_rot = -y_base * np.sin(grid_yaw_rad)
-    y_rot = y_base * np.cos(grid_yaw_rad)
+    # Rotate the vector exactly with the ship's 3D IMU orientation (Pitch, Roll, and Yaw)
+    v_rot = np.dot(R_rx_ideal, v_ray)
+
+    # Project it down to intersect the flat seafloor
+    if v_rot[2] > 1e-6:
+        scale = depth / v_rot[2]
+        x_rot = v_rot[0] * scale
+        y_rot = v_rot[1] * scale
+    else:
+        x_rot, y_rot = 0, 0  # Fallback for impossible angles
 
     fig.add_trace(go.Scatter3d(
         x=[0, x_rot], y=[0, y_rot], z=[0, depth],
@@ -489,15 +509,17 @@ for i, ang in enumerate(ref_angles):
     # Save label coordinates
     lbl_x.append(x_rot)
     lbl_y.append(y_rot)
-    lbl_z.append(depth * 0.95)
+    lbl_z.append(depth)
     lbl_text.append(f"{ang}°")
 
-# Add Angular Degree Labels
-fig.add_trace(go.Scatter3d(
-    x=lbl_x, y=lbl_y, z=lbl_z,
-    mode='text', text=lbl_text, textfont=dict(color='gray', size=12),
-    name='Angle Labels', hoverinfo='skip', showlegend=False
-))
+    # Add the angle text labels to the seafloor
+    fig.add_trace(go.Scatter3d(
+        x=lbl_x, y=lbl_y, z=lbl_z,
+        mode='text', text=lbl_text, textfont=dict(color='gray', size=12),
+        name='Angle Labels',
+        showlegend=False,
+        hoverinfo='skip'
+    ))
 
 # Add 100 Ideal Sounding Points (blue dots matching ideal sectors)
 if show_ideal_soundings and len(ideal_sounding_dots) > 0:
