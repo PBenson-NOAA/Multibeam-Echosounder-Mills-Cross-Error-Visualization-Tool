@@ -98,17 +98,20 @@ def get_sector_steering(sector_center_angle):
         yaw_comp_rad = np.arctan(np.tan(np.radians(sector_center_angle)) * np.sin(np.radians(imu_yaw)))
         steer_deg += np.degrees(yaw_comp_rad)
 
-    # This is an attempt to "intelligently" restrict transmit to region within RX listening area. Likely a gross over-simplification of what is actually done.
-    # Maybe remove this since it could just add confusion?
+    # Tx sector steering limits
     outer_edge_deg = 0.0
     for s_start, s_end in sector_limits:
         if s_start <= sector_center_angle <= s_end:
             outer_edge_deg = max(abs(s_start), abs(s_end))
             break
 
-    max_allowable_steer = max(0.0, 90.0 - outer_edge_deg -(tx_beamwidth / 2.0))
-
+    # Mathematical steering limit
+    max_allowable_steer = max(0.0, 90.0 - outer_edge_deg - (tx_beamwidth / 2.0))
     steer_deg = np.clip(steer_deg, -max_allowable_steer, max_allowable_steer)
+
+    # This is an attempt to restrict transmit to region within RX listening area. Likely a gross over-simplification of what is actually done.
+    max_rx_catch_angle = max(0.0, (rx_fore_aft_bw / 2.0) - (tx_beamwidth / 2.0))
+    steer_deg = np.clip(steer_deg, -max_rx_catch_angle, max_rx_catch_angle)
 
     return np.radians(steer_deg)
 
