@@ -745,6 +745,20 @@ if show_actual_tx:
             showlegend=(idx == 0)
         ))
 
+# Add Ideal TX Footprint
+if show_ideal_tx:
+    ideal_colors = ['darkblue', 'blue']
+    for idx, sector_pts in enumerate(calculated_tx_sectors):
+        color = ideal_colors[idx % len(ideal_colors)]
+        fig.add_trace(go.Scatter3d(
+            x=[p[0] for p in sector_pts] + [sector_pts[0][0]],
+            y=[p[1] for p in sector_pts] + [sector_pts[0][1]],
+            z=[p[2] for p in sector_pts] + [sector_pts[0][2]],
+            mode='lines', line=dict(color=color, width=3, dash='dash'),
+            name='Ideal TX Sectors' if idx == 0 else None,
+            showlegend=(idx == 0)
+        ))
+
 # --- RX Listening Region ---
 if show_rx_bowtie:
     theta_sweep = np.linspace(-np.radians(80.0), np.radians(80.0), 60)
