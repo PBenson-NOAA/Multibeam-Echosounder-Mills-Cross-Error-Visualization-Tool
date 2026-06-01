@@ -20,6 +20,9 @@ with st.sidebar.container(border=True):
 with st.sidebar.expander("Environment", expanded=True):
     depth = st.number_input("Depth (m)", min_value=1.0, max_value=12000.0, value=100.0, step=10.0)
     c_sound = st.number_input("Sound Speed (m/s)", min_value=1400.0, max_value=1600.0, value=1500.0, step=1.0)
+    water_temp = st.number_input("Water Temperature (°C)", min_value=-2.0, max_value=40.0, value=10.0, step=1.0)
+    salinity = st.number_input("Salinity (ppt)", min_value=0.0, max_value=50.0, value=35.0, step=1.0)
+    ph_level = st.number_input("pH", min_value=5.0, max_value=10.0, value=8.1, step=0.1)
 
 
 with st.sidebar.expander("Array Specifications", expanded=True):
@@ -35,16 +38,21 @@ with st.sidebar.expander("Array Specifications", expanded=True):
     num_sectors = st.selectbox("Number of TX Sectors", options=[1, 2, 3, 4, 5, 8], index=0)
     shading_type = st.selectbox("Array Shading", options=["Uniform", "Hann", "Hamming"], index=0)
 
+with st.sidebar.expander("Active Sonar Equation (Power & Noise)", expanded=True):
+    source_level = st.number_input("Source Level (SL) [dB]", min_value=100.0, max_value=300.0, value=220.0, step=1.0)
+    noise_level = st.number_input("Noise Level (NL) [dB]", min_value=10.0, max_value=120.0, value=50.0, step=1.0)
+    bs_nadir = st.number_input("Baseline Scattering Strength [dB]", min_value=-60.0, max_value=0.0, value=-20.0, step=1.0)
+    apply_tvg = st.checkbox("Apply TVG to Heatmap", value=True)
 
 # Dynamic Motion
-with st.sidebar.expander("IMU Dynamic Motion", expanded=True):
+with st.sidebar.expander("Vessel Motion", expanded=True):
     c1, c2, c3 = st.columns(3)
     imu_roll = c1.number_input("Roll (°)", value=0.0, step=1.0)
     imu_pitch = c2.number_input("Pitch (°)", value=0.0, step=1.0)
     imu_yaw = c3.number_input("Yaw (°)", value=0.0, step=1.0)
 
 # Static Mounting Biases
-with st.sidebar.expander("Mounting Biases (Static Errors)", expanded=True):
+with st.sidebar.expander("Array Mounting Biases", expanded=True):
     st.markdown("**TX Array Biases**")
     c1, c2, c3 = st.columns(3)
     tx_roll_bias = c1.number_input("TX Roll (°)", value=0.0, step=1.0)
@@ -71,7 +79,7 @@ with st.sidebar.expander("Acoustic Lobes", expanded=True):
     show_tx_lobe = st.checkbox("Show TX Lobe (Blue)", value=False)
     if show_tx_lobe and num_sectors > 1:
         st.warning(
-            "Note: The 3D TX lobe balloon does not support simultaneous multi-sector visualization. It currently renders the active queried sector only.")
+            "Note: The 3D TX lobe display does not support simultaneous multi-sector visualization. It currently renders the active queried sector only.")
     show_rx_lobe = st.checkbox("Show RX Lobe (Red)", value=False)
     show_combined_lobe = st.checkbox("Show Combined Product Lobe", value=True)
 
@@ -166,6 +174,43 @@ rx_bw_rad = bw_factor * wavelength / L_rx
 dynamic_tx_bw_rad = tx_bw_rad / np.cos(tx_steer_rad)
 dynamic_rx_bw_rad = rx_bw_rad / np.cos(theta_rad)
 
+
+def calculate_absorption_fg(frequency_hz, T, S, D, pH, c_sound_user):
+    """
+    Calculates the acoustic absorption coefficient (alpha) in dB/m
+    using the full Francois-Garrison (1982) model.
+    """
+    f = frequency_hz / 1000.0  # Convert Hz to kHz
+    T_k = T + 273.15  # Convert Temperature to Kelvin
+
+    # Use the user's manually adjusted sound speed to keep geometry consistent
+    c = c_sound_user
+
+    # Boric Acid Contribution (Dominant at low frequencies ~ <10 kHz)
+    f1 = 2.8 * np.sqrt(S / 35.0) * (10.0 ** (4.0 - (1245.0 / T_k)))
+    A1 = (8.86 / c) * (10.0 ** (0.78 * pH - 5.0))
+    alpha_boric = (A1 * f1 * f ** 2) / (f ** 2 + f1 ** 2)
+
+    # Magnesium Sulfate Contribution (Dominant at mid frequencies ~ 10-100 kHz)
+    f2 = (8.17 * (10.0 ** (8.0 - (1990.0 / T_k)))) / (1.0 + 0.0018 * (S - 35.0))
+    A2 = 21.44 * (S / c) * (1.0 + 0.025 * T)
+    P2 = 1.0 - (1.37e-4 * D) + (6.2e-9 * D ** 2)
+    alpha_mgso4 = (A2 * P2 * f2 * f ** 2) / (f ** 2 + f2 ** 2)
+
+    # Pure Water Viscosity Contribution (Dominant at high frequencies ~>200 kHz)
+    if T <= 20.0:
+        A3 = 4.937e-4 - (2.59e-5 * T) + (9.11e-7 * T ** 2) - (1.50e-8 * T ** 3)
+    else:
+        A3 = 3.964e-4 - (1.146e-5 * T) + (1.45e-7 * T ** 2) - (6.50e-10 * T ** 3)
+
+    P3 = 1.0 - (3.83e-5 * D) + (4.9e-10 * D ** 2)
+    alpha_pure = A3 * P3 * f ** 2
+
+    # Total attenuation is the sum of all three components (dB/km)
+    alpha_db_km = alpha_boric + alpha_mgso4 + alpha_pure
+
+    # Convert from dB/km to dB/m for local spatial calculations
+    return alpha_db_km / 1000.0
 
 # --- 3-Axis Rotation Matrix (Tait-Bryan Yaw-Pitch-Roll) ---
 def get_rotation_matrix(roll_deg, pitch_deg, yaw_deg):
@@ -270,7 +315,7 @@ def _numba_array_factor(sin_theta, steer_rad, d_lambda, weights):
     # Return the absolute amplitude
     return np.sqrt(sum_real ** 2 + sum_imag ** 2)
 
-# --- Acoustic Directivity and Hardware Math---
+# --- Acoustic Directivity and Hardware Math ---
 # Physical array elements are locked to the nominal half-wavelength (1500 m/s)
 d_spacing_nom = lambda_nom / 2.0
 d_lambda_eff = d_spacing_nom / wavelength  # Environmental spacing-to-wavelength ratio
@@ -465,6 +510,46 @@ col4.metric("Inside RX Listening Area?", rx_status)
 col5.metric("Along Track Patch Width", f"{tx_x_width:.2f} m")
 col6.metric("Sounding Patch Area", f"{patch_area:.2f} m²")
 
+# --- Calculate Transmission Loss and Intensity for Queried Beam---
+slant_range_m = 0.0
+alpha_db_m = 0.0
+spreading_loss = 0.0
+absorption_loss = 0.0
+two_way_tl = 0.0
+dynamic_ts = 0.0
+relative_intensity = 0.0
+absolute_pressure = 0.0
+status_text = ":red[Not Detected]"
+tvg_display = "N/A"
+
+if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
+    slant_range_m = np.linalg.norm(pt_physical)
+    alpha_db_m = calculate_absorption_fg(frequency, water_temp, salinity, depth, ph_level, c_sound)
+
+    spreading_loss = 40 * np.log10(slant_range_m)
+    absorption_loss = 2 * alpha_db_m * slant_range_m
+    two_way_tl = spreading_loss + absorption_loss
+
+    lambert_angular_decay = 10 * np.log10(np.cos(np.radians(queried_angle)) ** 2 + 1e-12)
+    area_scattering = 10 * np.log10(patch_area + 1e-12)
+    dynamic_ts = bs_nadir + lambert_angular_decay + area_scattering
+
+    relative_intensity = dynamic_ts - two_way_tl
+    absolute_pressure = source_level + relative_intensity
+
+    if absolute_pressure > noise_level:
+        status_text = ":green[Detected]"
+        tvg_display = f"{dynamic_ts:.1f} dB"
+    else:
+        status_text = ":red[Not Detected]"
+        tvg_display = "N/A (No Signal)"
+
+acol1, acol2, acol3, acol4, acol5, acol6 = st.columns(6)
+acol1.metric("Detection Status", status_text)
+acol2.metric("TVG Corrected Return Intensity", tvg_display)
+acol3.metric("Raw Return (Absolute Pressure)", f"{absolute_pressure:.1f} dB")
+
+
 st.markdown("---")
 st.subheader("**Theoretical Array Specifications (Nominal 1500 m/s)**")
 
@@ -594,28 +679,67 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
     Z_grid = np.full_like(X_grid, depth)
     Intensity_dB = np.zeros_like(X_grid)
 
+    # Calculate alpha once for the whole grid
+    alpha_db_m = calculate_absorption_fg(frequency, water_temp, salinity, depth, ph_level, c_sound)
+
+    # Dynamically anchor the color scale to the nadir values so it never blanks out
+    nadir_tl = 40 * np.log10(depth) + 2 * alpha_db_m * depth
+
+    if apply_tvg:
+        cmax_val = bs_nadir
+        cmin_val = bs_nadir - 50.0
+        cbar_title = "TVG Corrected Intensity (dB)"
+    else:
+        # Raw Intensity strips away SL, leaving just the environmental penalties
+        cmax_val = bs_nadir - nadir_tl
+        cmin_val = cmax_val - 60.0
+        cbar_title = "Raw Intensity (dB)"
+
     for i in range(X_grid.shape[0]):
         for j in range(X_grid.shape[1]):
             P = np.array([X_grid[i, j], Y_grid[i, j], Z_grid[i, j]])
-            v_geo = P / np.linalg.norm(P)
+            R = np.linalg.norm(P)
 
+            if R == 0:
+                continue
+
+            v_geo = P / R
+
+            # Array Directivity
             D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, is_tx=True)
-
             D_rx = calculate_directivity(v_geo, R_rx_mech, theta_rad, is_tx=False)
             I_linear = np.abs(D_tx * D_rx)
-            Intensity_dB[i, j] = 20 * np.log10(I_linear + 1e-6)
+            DI_dB = 20 * np.log10(I_linear + 1e-12)
 
-    # Clip to -40 dB to clean up the visual floor
-    Intensity_dB = np.clip(Intensity_dB, -40, 0)
+            # Transmission Loss
+            two_way_tl = 40 * np.log10(R) + 2 * alpha_db_m * R
 
+            # Lambertian Target Strength
+            cos_theta = abs(Z_grid[i, j]) / R
+            lambert_decay = 10 * np.log10(cos_theta ** 2 + 1e-12)
+            pixel_ts = bs_nadir + lambert_decay
+
+            # Calculate absolute physical pressure for this specific pixel
+            pixel_absolute_pressure = source_level - two_way_tl + pixel_ts + DI_dB
+            raw_intensity = pixel_ts - two_way_tl + DI_dB
+
+            if pixel_absolute_pressure <= noise_level:
+                Intensity_dB[i, j] = cmin_val
+            else:
+                if apply_tvg:
+                    Intensity_dB[i, j] = pixel_ts + DI_dB
+                else:
+                    Intensity_dB[i, j] = raw_intensity
+
+    # Plot the Surface
     fig.add_trace(go.Surface(
         x=X_grid, y=Y_grid, z=Z_grid,
         surfacecolor=Intensity_dB,
         colorscale='Jet',
-        cmin=-40, cmax=0,
-        name='Seafloor Footprint (dB)',
+        cmin=cmin_val, cmax=cmax_val,
+        name='Seafloor Footprint',
         showscale=True,
-        colorbar=dict(title="dB", x=0.85, len=0.5)
+        colorbar=dict(title=cbar_title, x=0.85, len=0.5)
     ))
 
 # --- 3D Acoustic Lobes ---
