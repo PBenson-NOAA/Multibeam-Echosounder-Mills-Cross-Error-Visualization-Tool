@@ -1,10 +1,11 @@
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
+from numba import njit
 
 st.set_page_config(layout="wide", page_title="Mills Cross Error Visualization")
 
-st.title("Multibeam Echosounder Mills Cross Error Visualization Tool")
+st.title("Multibeam Echosounder Mills Cross Visualization Tool")
 st.markdown(
     "A visual aid to assess the impact of mechanical biases, dynamic IMU motion, and active beam steering on a flat seafloor baseline.")
 
@@ -33,6 +34,7 @@ with st.sidebar.expander("Array Specifications", expanded=True):
                                          step=1.0)
     num_sectors = st.selectbox("Number of TX Sectors", options=[1, 2, 3, 4, 5, 8], index=0)
     shading_type = st.selectbox("Array Shading", options=["Uniform", "Hann", "Hamming"], index=0)
+
 
 # Dynamic Motion
 with st.sidebar.expander("IMU Dynamic Motion", expanded=True):
@@ -141,8 +143,24 @@ for s_start, s_end in sector_limits:
 tx_steer_rad = get_sector_steering(queried_sector_center)
 tx_steer_angle = np.degrees(tx_steer_rad)  # Preserve for fan geometry
 theta_rad = np.radians(array_relative_rx_angle)
-tx_bw_rad = np.radians(tx_beamwidth)
-rx_bw_rad = np.radians(rx_beamwidth)
+
+# Determine the beamwidth factor based on shading
+if shading_type == "Uniform":
+    bw_factor = 0.886
+elif shading_type == "Hann":
+    bw_factor = 1.20
+elif shading_type == "Hamming":
+    bw_factor = 1.30
+
+# Calculate physical arrays based on a nominal 1500 m/s sound speed
+lambda_nom = 1500.0 / frequency
+L_tx = bw_factor * lambda_nom / np.radians(tx_beamwidth)
+L_rx = bw_factor * lambda_nom / np.radians(rx_beamwidth)
+
+# Calculate effective beamwidths based on the environmental sound speed slider
+wavelength = c_sound / frequency
+tx_bw_rad = bw_factor * wavelength / L_tx
+rx_bw_rad = bw_factor * wavelength / L_rx
 
 # Apply the Secant Effect for the queried beam
 dynamic_tx_bw_rad = tx_bw_rad / np.cos(tx_steer_rad)
@@ -213,47 +231,75 @@ def solve_mills_cross_intersection(R_tx, R_rx, tx_steer_rad, rx_steer_rad, seafl
     scale = seafloor_depth / bv_geo[2]
     return bv_geo * scale
 
-
-# --- ACOUSTIC DIRECTIVITY MATH ---
-wavelength = c_sound / frequency
-
-# Shading widens main lobe. To maintain same 3dB beamwidth, physical array must be longer.
-if shading_type == "Uniform":
-    bw_factor = 0.886
-elif shading_type == "Hann":
-    bw_factor = 1.20
-elif shading_type == "Hamming":
-    bw_factor = 1.30
-
-# Calculate required array length based on shading choice
-L_tx = bw_factor * wavelength / np.radians(tx_beamwidth)
-L_rx = bw_factor * wavelength / np.radians(rx_beamwidth)
-
-
-def calculate_directivity(v_geo, R_mech, steer_rad, L, wav, is_tx, shading="Hamming"):
-    """Calculates the linear acoustic amplitude with optional array shading."""
-    v_local = np.dot(R_mech.T, v_geo)
-
-    # TX is aligned along X-axis, RX is aligned along Y-axis
-    if is_tx:
-        sin_theta = v_local[0]
-    else:
-        sin_theta = v_local[1]
-
-    # Normalized spatial frequency parameter
-    x = (L / wav) * (sin_theta - np.sin(steer_rad))
-
-    # Superposition of sinc functions to simulate amplitude weighting.
-    # Probably a better way to do this!
+def generate_array_weights(N, shading="Hamming"):
+    """Pre-calculates the amplitude weights for an N-element array."""
+    n = np.arange(N)
     if shading == "Uniform":
-        return np.sinc(x)
+        weights = np.ones(N)
     elif shading == "Hann":
         # 0.5 + 0.5 cosine weighting
-        return 0.5 * np.sinc(x) + 0.25 * np.sinc(x - 1.0) + 0.25 * np.sinc(x + 1.0)
+        weights = 0.5 * (1 - np.cos(2 * np.pi * n / (N - 1)))
     elif shading == "Hamming":
-        # 0.54 + 0.46 cosine weighting (optimized to crush first sidelobe)
-        return 0.54 * np.sinc(x) + 0.23 * np.sinc(x - 1.0) + 0.23 * np.sinc(x + 1.0)
-    return np.sinc(x)
+        # 0.54 + 0.46 cosine weighting
+        weights = 0.54 - 0.46 * np.cos(2 * np.pi * n / (N - 1))
+    else:
+        weights = np.ones(N)
+
+    # Normalize weights so the peak main-lobe amplitude is exactly 1.0
+    return weights / np.sum(weights)
+
+
+@njit(fastmath=True)
+def _numba_array_factor(sin_theta, steer_rad, d_lambda, weights):
+    """
+    An attempt to use optimized discrete array factor calculation using machine code to reduce chugging.
+    d_lambda = physical spacing (d) divided by wavelength.
+    """
+    # Calculate the baseline phase shift based on steering
+    phase_shift = 2.0 * np.pi * d_lambda * (sin_theta - np.sin(steer_rad))
+
+    sum_real = 0.0
+    sum_imag = 0.0
+
+    # Complex summation across all N elements
+    for n in range(len(weights)):
+        phase = n * phase_shift
+        sum_real += weights[n] * np.cos(phase)
+        sum_imag += weights[n] * np.sin(phase)
+
+    # Return the absolute amplitude
+    return np.sqrt(sum_real ** 2 + sum_imag ** 2)
+
+# --- Acoustic Directivity and Hardware Math---
+# Physical array elements are locked to the nominal half-wavelength (1500 m/s)
+d_spacing_nom = lambda_nom / 2.0
+d_lambda_eff = d_spacing_nom / wavelength  # Environmental spacing-to-wavelength ratio
+
+# Theoretical number of elements built into the hardware
+true_N_tx = int(np.ceil(L_tx / d_spacing_nom))
+true_N_rx = int(np.ceil(L_rx / d_spacing_nom))
+
+# Cap computational elements for Numba to maintain some semblance of UI speed
+comp_N_tx = max(1, min(true_N_tx, 300))
+comp_N_rx = max(1, min(true_N_rx, 300))
+
+# Pre-calculate distinct weights for TX and RX arrays
+tx_weights = generate_array_weights(comp_N_tx, shading=shading_type)
+rx_weights = generate_array_weights(comp_N_rx, shading=shading_type)
+
+def calculate_directivity(v_geo, R_mech, steer_rad, is_tx):
+    """Wrapper that dynamically routes TX or RX arrays to the fast Numba math."""
+    v_local = np.dot(R_mech.T, v_geo)
+
+    if is_tx:
+        sin_theta = v_local[0]
+        weights = tx_weights
+    else:
+        sin_theta = v_local[1]
+        weights = rx_weights
+
+    # Call the pre-compiled Numba function using the effective d_lambda
+    return _numba_array_factor(sin_theta, steer_rad, d_lambda_eff, weights)
 
 
 def make_tx_ray(theta_sweep, psi_steer):
@@ -419,6 +465,40 @@ col4.metric("Inside RX Listening Area?", rx_status)
 col5.metric("Along Track Patch Width", f"{tx_x_width:.2f} m")
 col6.metric("Sounding Patch Area", f"{patch_area:.2f} m²")
 
+st.markdown("---")
+st.subheader("**Theoretical Array Specifications (Nominal 1500 m/s)**")
+
+# Calculate UI variables matching the math engine
+lambda_nom_ui = 1500.0 / frequency
+bw_factor_ui = 0.886 if shading_type == "Uniform" else (1.20 if shading_type == "Hann" else 1.30)
+
+L_tx_ui = bw_factor_ui * lambda_nom_ui / np.radians(tx_beamwidth)
+L_rx_ui = bw_factor_ui * lambda_nom_ui / np.radians(rx_beamwidth)
+
+N_tx_ui = int(np.ceil(L_tx_ui / (lambda_nom_ui / 2.0)))
+N_rx_ui = int(np.ceil(L_rx_ui / (lambda_nom_ui / 2.0)))
+
+# Calculate Effective Beamwidth for UI
+wav_env_ui = c_sound / frequency
+eff_tx_deg = np.degrees(bw_factor_ui * wav_env_ui / L_tx_ui)
+eff_rx_deg = np.degrees(bw_factor_ui * wav_env_ui / L_rx_ui)
+
+# Calculate deltas and hide them if the rounded difference is 0.00
+tx_diff = eff_tx_deg - tx_beamwidth
+tx_delta = f"{tx_diff:.2f}°" if abs(tx_diff) >= 0.005 else None
+
+rx_diff = eff_rx_deg - rx_beamwidth
+rx_delta = f"{rx_diff:.2f}°" if abs(rx_diff) >= 0.005 else None
+
+# 6 column layout for array specs metrics
+hw1, hw2, hw3, hw4, hw5, hw6 = st.columns(6)
+hw1.metric("TX Length", f"{L_tx_ui:.2f} m")
+hw2.metric("RX Length", f"{L_rx_ui:.2f} m")
+hw3.metric("TX Elements", f"{N_tx_ui}")
+hw4.metric("RX Elements", f"{N_rx_ui}")
+hw5.metric("Effective TX BW", f"{eff_tx_deg:.2f}°", delta=tx_delta, delta_color="inverse")
+hw6.metric("Effective RX BW", f"{eff_rx_deg:.2f}°", delta=rx_delta, delta_color="inverse")
+
 # --- GRAPH TOGGLES ---
 st.markdown("---")
 st.subheader("Visualization Overlays")
@@ -519,10 +599,9 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
             P = np.array([X_grid[i, j], Y_grid[i, j], Z_grid[i, j]])
             v_geo = P / np.linalg.norm(P)
 
-            D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, L_tx, wavelength, is_tx=True,
-                                         shading=shading_type)
-            D_rx = calculate_directivity(v_geo, R_rx_mech, theta_rad, L_rx, wavelength, is_tx=False,
-                                         shading=shading_type)
+            D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, is_tx=True)
+
+            D_rx = calculate_directivity(v_geo, R_rx_mech, theta_rad, is_tx=False)
             I_linear = np.abs(D_tx * D_rx)
             Intensity_dB[i, j] = 20 * np.log10(I_linear + 1e-6)
 
@@ -581,11 +660,9 @@ if (show_tx_lobe or show_rx_lobe or show_combined_lobe) and np.linalg.norm(pt_ph
                 v_geo = np.array([X_unit[i, j], Y_unit[i, j], Z_unit[i, j]])
 
                 if is_tx:
-                    D = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, L_tx, wavelength, is_tx=True,
-                                              shading=shading_type)
+                    D = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, is_tx=True)
                 else:
-                    D = calculate_directivity(v_geo, R_rx_mech, theta_rad, L_rx, wavelength, is_tx=False,
-                                              shading=shading_type)
+                    D = calculate_directivity(v_geo, R_rx_mech, theta_rad, is_tx=False)
 
                 R_linear[i, j] = np.abs(D)
 
@@ -638,10 +715,9 @@ if (show_tx_lobe or show_rx_lobe or show_combined_lobe) and np.linalg.norm(pt_ph
                 v_geo = np.array([X_comb[i, j], Y_comb[i, j], Z_comb[i, j]])
 
                 # Multiply TX and RX to get the combined acoustic product
-                D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, L_tx, wavelength, is_tx=True,
-                                             shading=shading_type)
-                D_rx = calculate_directivity(v_geo, R_rx_mech, theta_rad, L_rx, wavelength, is_tx=False,
-                                             shading=shading_type)
+                D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, is_tx=True)
+
+                D_rx = calculate_directivity(v_geo, R_rx_mech, theta_rad, is_tx=False)
                 R_comb_linear[i, j] = np.abs(D_tx * D_rx)
 
         R_dB = np.clip(20 * np.log10(R_comb_linear + 1e-12), -40, 0)
@@ -810,7 +886,7 @@ fig.add_trace(go.Scatter3d(x=[pt_calculated[0]], y=[pt_calculated[1]], z=[pt_cal
 fig.add_trace(go.Scatter3d(x=[pt_physical[0]], y=[pt_physical[1]], z=[pt_physical[2]], mode='markers',
                            marker=dict(color='red', size=6), name='Actual Sounding'))
 
-# --- VISUAL ANGLE REFERENCE GRID (Tracking Actual TX Sectors) ---
+# --- Visual Angle Reference Grid Tracking TX Sectors ---
 ref_angles = np.linspace(-75, 75, 11, dtype=int)  # Label every 15 degrees
 lbl_x, lbl_y, lbl_z, lbl_text = [], [], [], []
 
