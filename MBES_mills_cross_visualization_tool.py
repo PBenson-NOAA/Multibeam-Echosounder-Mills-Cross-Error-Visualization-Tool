@@ -38,11 +38,34 @@ with st.sidebar.expander("Array Specifications", expanded=True):
     num_sectors = st.selectbox("Number of TX Sectors", options=[1, 2, 3, 4, 5, 8], index=0)
     shading_type = st.selectbox("Array Shading", options=["Uniform", "Hann", "Hamming"], index=0)
 
-with st.sidebar.expander("Active Sonar Equation (Power & Noise)", expanded=True):
-    source_level = st.number_input("Source Level (SL) [dB]", min_value=100.0, max_value=300.0, value=220.0, step=1.0)
+with st.sidebar.expander("Acoustic Energy & Detection", expanded=True):
+    st.markdown("**Power & Noise Floor**")
+    source_level = st.number_input("Source Level (SL) [dB]", min_value=100.0, max_value=300.0, value=180.0, step=1.0)
     noise_level = st.number_input("Noise Level (NL) [dB]", min_value=10.0, max_value=120.0, value=50.0, step=1.0)
-    bs_nadir = st.number_input("Baseline Scattering Strength [dB]", min_value=-60.0, max_value=0.0, value=-20.0, step=1.0)
+    bs_nadir = st.number_input("Target Strength [dB]", min_value=-60.0, max_value=0.0, value=-20.0, step=1.0)
     apply_tvg = st.checkbox("Apply TVG to Heatmap", value=True)
+
+    st.markdown("---")
+    st.markdown("**Pulse Specifications**")
+    pulse_width_ms = st.number_input("Pulse Width (τ) [ms]", min_value=0.1, max_value=100.0, value=1.0, step=0.1)
+    bandwidth_hz = st.number_input("Bandwidth (BW) [Hz]", min_value=100.0, max_value=1000000.0, value=1000.0,
+                                   step=1000.0)
+    time_bw_product = bandwidth_hz * (pulse_width_ms / 1000.0)
+    # Dynamic Alert for CW and FM
+    if abs(time_bw_product - 1.0) < 1e-3:
+        st.success(
+            "**Pulse Type: CW**\n\n"
+        "Bandwidth closely matches $1/\\tau$, making this a standard CW pulse. "
+        "The Time-Bandwidth product is 1, yielding a Processing Gain of **0.0 dB**. "
+        "Range resolution is strictly limited by the physical pulse length."
+        )
+    else:
+        st.info(
+            f"**Pulse Type: FM (Chirp)**\n\n"
+            f"Bandwidth exceeds $1/\\tau$. The receiver's Matched Filter will compress this swept pulse, "
+            f"artificially boosting the Signal-to-Noise Ratio (SNR). \n\n"
+            f"A Pulse Compression Processing Gain of **+{10 * np.log10(time_bw_product):.1f} dB** will be applied to the detection envelope."
+        )
 
 # Dynamic Motion
 with st.sidebar.expander("Vessel Motion", expanded=True):
@@ -76,12 +99,21 @@ with st.sidebar.expander("Active Stabilization & Steering", expanded=True):
         manual_tx_steer = 0.0
 
 with st.sidebar.expander("Acoustic Lobes", expanded=True):
-    show_tx_lobe = st.checkbox("Show TX Lobe (Blue)", value=False)
-    if show_tx_lobe and num_sectors > 1:
+    st.markdown("**Theoretical Beam Patterns (Relative dB)**")
+    show_tx_solid = st.checkbox("TX Directivity Pattern (Blue)", value=True)
+    if show_tx_solid and num_sectors > 1:
         st.warning(
             "Note: The 3D TX lobe display does not support simultaneous multi-sector visualization. It currently renders the active queried sector only.")
-    show_rx_lobe = st.checkbox("Show RX Lobe (Red)", value=False)
-    show_combined_lobe = st.checkbox("Show Combined Product Lobe", value=True)
+    show_rx_solid = st.checkbox("RX Directivity Pattern (Red)", value=True)
+    show_combined_solid = st.checkbox("Combined Effective Beam", value=True)
+
+    st.markdown("**Detection Envelopes (Physical Range)**")
+    show_tx_ghost = st.checkbox("TX Ensonified Volume", value=False)
+    if show_tx_ghost and num_sectors > 1:
+        st.warning(
+            "Note: The 3D TX lobe display does not support simultaneous multi-sector visualization. It currently renders the active queried sector only.")
+    show_rx_ghost = st.checkbox("RX Noise-Limited Range", value=False)
+    show_combined_ghost = st.checkbox("Combined Detection Envelope", value=False)
 
 # --- MATH & GEOMETRY ---
 # True Mechanical Orientations (IMU Dynamic Motion + Static Mounting Biases)
@@ -511,6 +543,14 @@ col5.metric("Along Track Patch Width", f"{tx_x_width:.2f} m")
 col6.metric("Sounding Patch Area", f"{patch_area:.2f} m²")
 
 # --- Calculate Transmission Loss and Intensity for Queried Beam---
+# Convert user's sidebar items to standard SI base units
+tau_sec = pulse_width_ms / 1000.0
+bw_hz = bandwidth_hz
+
+# Calculate Signal Processing Gain (PG)
+time_bandwidth_product = bw_hz * tau_sec
+processing_gain = 10 * np.log10(time_bandwidth_product) if time_bandwidth_product > 1.0 else 0.0
+
 slant_range_m = 0.0
 alpha_db_m = 0.0
 spreading_loss = 0.0
@@ -535,7 +575,7 @@ if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
     dynamic_ts = bs_nadir + lambert_angular_decay + area_scattering
 
     relative_intensity = dynamic_ts - two_way_tl
-    absolute_pressure = source_level + relative_intensity
+    absolute_pressure = source_level + relative_intensity + processing_gain
 
     if absolute_pressure > noise_level:
         status_text = ":green[Detected]"
@@ -545,7 +585,7 @@ if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
         tvg_display = "N/A (No Signal)"
 
 acol1, acol2, acol3, acol4, acol5, acol6 = st.columns(6)
-acol1.metric("Detection Status", status_text)
+acol1.metric("Detection Status (Range Only)", status_text)
 acol2.metric("TVG Corrected Return Intensity", tvg_display)
 acol3.metric("Raw Return (Absolute Pressure)", f"{absolute_pressure:.1f} dB")
 
@@ -717,10 +757,11 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
             # Lambertian Target Strength
             cos_theta = abs(Z_grid[i, j]) / R
             lambert_decay = 10 * np.log10(cos_theta ** 2 + 1e-12)
-            pixel_ts = bs_nadir + lambert_decay
+
+            pixel_ts = bs_nadir + lambert_decay + area_scattering
 
             # Calculate absolute physical pressure for this specific pixel
-            pixel_absolute_pressure = source_level - two_way_tl + pixel_ts + DI_dB
+            pixel_absolute_pressure = source_level - two_way_tl + pixel_ts + DI_dB + processing_gain
             raw_intensity = pixel_ts - two_way_tl + DI_dB
 
             if pixel_absolute_pressure <= noise_level:
@@ -743,29 +784,44 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
     ))
 
 # --- 3D Acoustic Lobes ---
-if (show_tx_lobe or show_rx_lobe or show_combined_lobe) and np.linalg.norm(pt_physical) > 0:
-    # Scale lobes to extend 10% past the seafloor to clearly show the footprint overlap
-    lobe_scale = np.linalg.norm(pt_physical) * 1.10
+if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_combined_solid or show_combined_ghost) and np.linalg.norm(pt_physical) > 0:
+    # Find max Two-Way Transmission Loss
+    max_allowable_tl = source_level + dynamic_ts + processing_gain - noise_level
+
+    # Calculate absorption for lobes
+    lobe_alpha_db_m = calculate_absorption_fg(frequency, water_temp, salinity, depth, ph_level, c_sound)
+
+    # Iterative Binary Solver to find Maximum Detection Range (R_max)
+    if max_allowable_tl <= 0:
+        lobe_scale = 1.0  # Signal is DOA
+    else:
+        r_min = 1.0
+        r_max = 20000.0
+
+        for _ in range(50):
+            r_mid = (r_min + r_max) / 2.0
+            tl_test = 40 * np.log10(r_mid) + 2 * lobe_alpha_db_m * r_mid
+
+            if tl_test < max_allowable_tl:
+                r_min = r_mid
+            else:
+                r_max = r_mid
+
+        lobe_scale = r_mid
 
 
-    def generate_native_lobe(is_tx, color_scale, name):
-        """Generates a 3D acoustic balloon mapped to the array's native mechanical axis."""
+    def generate_native_lobe(is_tx, color_scale, name, mode="Ghost"):
+        """Generates a mathematically pure 3D polar directivity pattern."""
 
         # Dynamically center the grid on the steered beam
         if is_tx:
-            # TX array is along x steered in pitch
             v_center = np.pi / 2 - tx_steer_rad
         else:
-            # RX array is along Y steered in roll
             v_center = np.pi / 2 - theta_rad
 
-        # Both fans sweep 180 degrees downwards
-        u = np.linspace(0, np.pi, 150)
-
-        # V sweeps +/- 55 degrees around the newly centered main lobe
-        # Maybe revisit this?
-        v = np.linspace(v_center - np.radians(45), v_center + np.radians(45), 200)
-
+        # Using odd numbers (151, 201) to ensure the exact center point is sampled!
+        u = np.linspace(0, np.pi, 151)
+        v = np.linspace(v_center - np.radians(45), v_center + np.radians(45), 201)
         U, V = np.meshgrid(u, v)
 
         if is_tx:
@@ -782,51 +838,65 @@ if (show_tx_lobe or show_rx_lobe or show_combined_lobe) and np.linalg.norm(pt_ph
         for i in range(X_unit.shape[0]):
             for j in range(X_unit.shape[1]):
                 v_geo = np.array([X_unit[i, j], Y_unit[i, j], Z_unit[i, j]])
-
                 if is_tx:
                     D = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, is_tx=True)
                 else:
                     D = calculate_directivity(v_geo, R_rx_mech, theta_rad, is_tx=False)
-
                 R_linear[i, j] = np.abs(D)
 
-        # Normalize and map to dB scale (-40dB Floor)
+        # Normalize and map to dB scale (-40dB Floor) for color and Solid mode
         R_dB = np.clip(20 * np.log10(R_linear + 1e-12), -40, 0)
-        R_physical_radius = (R_dB + 40.0) / 40.0
 
-        # Scale to push past the water column
-        X_lobe = X_unit * R_physical_radius * lobe_scale
-        Y_lobe = Y_unit * R_physical_radius * lobe_scale
-        Z_lobe = Z_unit * R_physical_radius * lobe_scale
+        # --- CHOOSE RADIAL SCALE BASED ON PHYSICAL MODE ---
+        if mode == "Ghost":
+            # Uses linear acoustic pressure scaling. Side lobes accurately reflect their limited physical penetration in the water column.
+            R_final = R_linear * lobe_scale
+            surface_opacity = 0.15
+
+        elif mode == "Solid":
+            # Uses linear-dB mapping so side lobes remain visually distinct. Theoretical pattern.
+            R_physical_radius = (R_dB + 40.0) / 40.0
+            R_final = R_physical_radius * depth
+            surface_opacity = 0.8
+
+        # Apply final calculated scale point-by-point
+        X_lobe = X_unit * R_final
+        Y_lobe = Y_unit * R_final
+        Z_lobe = Z_unit * R_final
 
         return go.Surface(
             x=X_lobe, y=Y_lobe, z=Z_lobe,
-            surfacecolor=R_dB,
+            surfacecolor=R_dB,  # Color map always remains in dB for contrast
             colorscale=color_scale,
             cmin=-40, cmax=0,
-            name=name,
+            name=f"{name} ({mode})",
             showscale=False,
-            opacity=0.6
+            opacity=surface_opacity
         )
 
+    # Add TX Traces
+    if show_tx_solid:
+        fig.add_trace(generate_native_lobe(is_tx=True, color_scale='Blues', name='TX Lobe', mode="Solid"))
+    if show_tx_ghost:
+        fig.add_trace(generate_native_lobe(is_tx=True, color_scale='Blues', name='TX Lobe', mode="Ghost"))
 
-    # Add the Native-Aligned Individual Lobes
-    if show_tx_lobe:
-        fig.add_trace(generate_native_lobe(is_tx=True, color_scale='Blues', name='TX Lobe'))
+    # Add RX Traces
+    if show_rx_solid:
+        fig.add_trace(generate_native_lobe(is_tx=False, color_scale='Reds', name='RX Lobe', mode="Solid"))
+    if show_rx_ghost:
+        fig.add_trace(generate_native_lobe(is_tx=False, color_scale='Reds', name='RX Lobe', mode="Ghost"))
 
-    if show_rx_lobe:
-        fig.add_trace(generate_native_lobe(is_tx=False, color_scale='Reds', name='RX Lobe'))
 
-    # Add the Combined Product Lobe
-    if show_combined_lobe:
-        # Tightly focus a Z-down grid exactly around the intersection point
+    def generate_combined_lobe(mode="Ghost"):
+        """Generates the mathematically pure combined beam."""
+
         beam_vec = pt_physical / np.linalg.norm(pt_physical)
         azimuth_center = np.arctan2(beam_vec[1], beam_vec[0])
         elevation_center = np.arccos(beam_vec[2])
 
         span = np.radians(8.0)
-        u_comb = np.linspace(azimuth_center - span, azimuth_center + span, 80)
-        v_comb = np.linspace(max(0, elevation_center - span), min(np.pi / 2, elevation_center + span), 80)
+        u_comb = np.linspace(azimuth_center - span, azimuth_center + span, 81)
+        v_comb = np.linspace(max(0, elevation_center - span), min(np.pi / 2, elevation_center + span), 81)
         U_comb, V_comb = np.meshgrid(u_comb, v_comb)
 
         X_comb = np.sin(V_comb) * np.cos(U_comb)
@@ -837,23 +907,39 @@ if (show_tx_lobe or show_rx_lobe or show_combined_lobe) and np.linalg.norm(pt_ph
         for i in range(X_comb.shape[0]):
             for j in range(X_comb.shape[1]):
                 v_geo = np.array([X_comb[i, j], Y_comb[i, j], Z_comb[i, j]])
-
-                # Multiply TX and RX to get the combined acoustic product
                 D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, is_tx=True)
-
                 D_rx = calculate_directivity(v_geo, R_rx_mech, theta_rad, is_tx=False)
                 R_comb_linear[i, j] = np.abs(D_tx * D_rx)
 
+        # Normalize to full dB scale
         R_dB = np.clip(20 * np.log10(R_comb_linear + 1e-12), -40, 0)
-        R_radius = (R_dB + 40.0) / 40.0
 
-        fig.add_trace(go.Surface(
-            x=X_comb * R_radius * lobe_scale,
-            y=Y_comb * R_radius * lobe_scale,
-            z=Z_comb * R_radius * lobe_scale,
+        # --- Choose radial scale based on mode ---
+        if mode == "Ghost":
+            # Two-way acoustic propagation boundary scale
+            R_final = R_comb_linear * lobe_scale
+            surface_opacity = 0.25
+
+        elif mode == "Solid":
+            # Polar plot scale
+            R_radius = (R_dB + 40.0) / 40.0
+            R_final = R_radius * depth
+            surface_opacity = 0.85
+
+        X_final = X_comb * R_final
+        Y_final = Y_comb * R_final
+        Z_final = Z_comb * R_final
+
+        return go.Surface(
+            x=X_final, y=Y_final, z=Z_final,
             surfacecolor=R_dB, colorscale='Viridis', cmin=-40, cmax=0,
-            name='Combined Lobe', showscale=False, opacity=0.9
-        ))
+            name=f'Combined Lobe ({mode})', showscale=False, opacity=surface_opacity
+        )
+
+    if show_combined_solid:
+        fig.add_trace(generate_combined_lobe(mode="Solid"))
+    if show_combined_ghost:
+        fig.add_trace(generate_combined_lobe(mode="Ghost"))
 
 # Add Actual TX Footprint
 if show_actual_tx:
@@ -1100,6 +1186,7 @@ if show_actual_soundings and len(actual_sounding_dots) > 0:
         name='Actual Sounding Points',
         showlegend=True
     ))
+
 
 # Figure layout
 fig.update_layout(
