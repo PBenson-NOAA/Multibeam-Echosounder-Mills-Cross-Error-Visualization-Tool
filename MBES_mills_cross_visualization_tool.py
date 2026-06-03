@@ -658,7 +658,7 @@ if has_overlap:
             color=colors[k % 2],
             delaunayaxis='z',
             hoverinfo='skip',
-            name='Pulse Length Bands' if k == 0 else None,
+            name='Pulse Duration Bands' if k == 0 else None,
             showlegend=(k == 0)
         ))
 
