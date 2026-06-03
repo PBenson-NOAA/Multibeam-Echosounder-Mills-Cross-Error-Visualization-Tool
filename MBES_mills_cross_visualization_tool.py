@@ -2,12 +2,52 @@ import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 from numba import njit
+from scipy.signal.windows import chebwin
 
-st.set_page_config(layout="wide", page_title="Mills Cross Error Visualization")
+st.set_page_config(layout="wide", page_title="Multibeam Echosounder Mills Cross Simulator")
 
-st.title("Multibeam Echosounder Mills Cross Visualization Tool")
+st.title("Multibeam Echosounder Mills Cross Simulator")
 st.markdown(
     "A visual aid to assess the impact of mechanical biases, dynamic IMU motion, and active beam steering on a flat seafloor baseline.")
+
+# --- Session State for pulse characteristics ---
+if "pulse_width_ms" not in st.session_state:
+    st.session_state.pulse_width_ms = 0.200
+if "bandwidth_hz" not in st.session_state:
+    st.session_state.bandwidth_hz = 5300.00 # match Tukey
+if "cw_lock" not in st.session_state:
+    st.session_state.cw_lock = True
+if "pulse_tapering" not in st.session_state:
+    st.session_state.pulse_tapering = "Tukey"
+
+# --- Set of functions for CW lock toggle ---
+def sync_bw_from_tau():
+    if st.session_state.cw_lock:
+        spectral_ratios = {"Rectangular": 1.0, "Tukey": 1.06, "Hamming": 1.36, "Hann": 1.44}
+        ratio = spectral_ratios[st.session_state.pulse_tapering]
+
+        # Use absolute duration for Fourier/Spectral calculations
+        abs_tau_s = st.session_state.pulse_width_ms / 1000.0
+
+        # BW = spectral_ratio / absolute_duration
+        st.session_state.bandwidth_hz = float(ratio / abs_tau_s)
+
+
+def sync_tau_from_bw():
+    if st.session_state.cw_lock:
+        spectral_ratios = {"Rectangular": 1.0, "Tukey": 1.06, "Hamming": 1.36, "Hann": 1.44}
+        ratio = spectral_ratios[st.session_state.pulse_tapering]
+
+        # absolute_duration = spectral_ratio / BW
+        abs_tau_s = ratio / st.session_state.bandwidth_hz
+        st.session_state.pulse_width_ms = float(abs_tau_s * 1000.0)
+
+
+def sync_from_taper_change():
+    # function for taper change alignment
+    if st.session_state.cw_lock:
+        sync_bw_from_tau()
+
 
 # --- SIDEBAR INTERFACE ---
 st.sidebar.header("Parameters")
@@ -17,65 +57,43 @@ with st.sidebar.container(border=True):
     st.subheader("Interactive Beam Query")
     queried_angle = st.number_input("Query Specific Swath Angle (°)", min_value=-75.0, max_value=75.0, value=45.0, step=1.0)
 
-with st.sidebar.expander("Environment", expanded=True):
-    depth = st.number_input("Depth (m)", min_value=1.0, max_value=12000.0, value=100.0, step=10.0)
+with st.sidebar.expander("Environment", expanded=False):
+    depth = st.number_input("Depth (m)", min_value=1.0, max_value=12000.0, value=25.0, step=1.0)
     c_sound = st.number_input("Sound Speed (m/s)", min_value=1400.0, max_value=1600.0, value=1500.0, step=1.0)
     water_temp = st.number_input("Water Temperature (°C)", min_value=-2.0, max_value=40.0, value=10.0, step=1.0)
     salinity = st.number_input("Salinity (ppt)", min_value=0.0, max_value=50.0, value=35.0, step=1.0)
     ph_level = st.number_input("pH", min_value=5.0, max_value=10.0, value=8.1, step=0.1)
 
+    alpha_placeholder = st.empty()
 
-with st.sidebar.expander("Array Specifications", expanded=True):
+
+with st.sidebar.expander("Array Specifications", expanded=False):
     c1, c2 = st.columns(2)
-    frequency = st.number_input("Frequency (Hz)", min_value=1000.0, max_value=1000000.0, value=300000.0, step=10000.0)
+    frequency = st.number_input("Frequency (Hz)", min_value=1000.0, max_value=1000000.0, value=300000.0, step=1000.0)
     tx_beamwidth = c1.number_input("TX BW (Along-Track) (°)", value=0.5, step=0.1)
     rx_beamwidth = c1.number_input("RX BW (Across-Track) (°)", value=1.0, step=0.1)
     tx_across_fan_bw = c2.number_input("TX BW (Across-Track) (°)", value=150.0, step=1.0)
     rx_fore_aft_bw = c2.number_input("RX BW (Along-Track) (°)", value=30.0, step=1.0)
 
-    target_swath_width = st.number_input("Target Swath Coverage (°)", min_value=10.0, max_value=150.0, value=120.0,
-                                         step=1.0)
+    target_swath_width = st.number_input("Target Swath Coverage (°)", min_value=10.0, max_value=150.0, value=120.0, step=1.0)
     num_sectors = st.selectbox("Number of TX Sectors", options=[1, 2, 3, 4, 5, 8], index=0)
-    shading_type = st.selectbox("Array Shading", options=["Uniform", "Hann", "Hamming"], index=0)
 
-with st.sidebar.expander("Acoustic Energy & Detection", expanded=True):
-    st.markdown("**Power & Noise Floor**")
-    source_level = st.number_input("Source Level (SL) [dB]", min_value=100.0, max_value=300.0, value=180.0, step=1.0)
-    noise_level = st.number_input("Noise Level (NL) [dB]", min_value=10.0, max_value=120.0, value=50.0, step=1.0)
-    bs_nadir = st.number_input("Target Strength [dB]", min_value=-60.0, max_value=0.0, value=-20.0, step=1.0)
-    apply_tvg = st.checkbox("Apply TVG to Heatmap", value=True)
-
-    st.markdown("---")
-    st.markdown("**Pulse Specifications**")
-    pulse_width_ms = st.number_input("Pulse Width (τ) [ms]", min_value=0.1, max_value=100.0, value=1.0, step=0.1)
-    bandwidth_hz = st.number_input("Bandwidth (BW) [Hz]", min_value=100.0, max_value=1000000.0, value=1000.0,
-                                   step=1000.0)
-    time_bw_product = bandwidth_hz * (pulse_width_ms / 1000.0)
-    # Dynamic Alert for CW and FM
-    if abs(time_bw_product - 1.0) < 1e-3:
-        st.success(
-            "**Pulse Type: CW**\n\n"
-        "Bandwidth closely matches $1/\\tau$, making this a standard CW pulse. "
-        "The Time-Bandwidth product is 1, yielding a Processing Gain of **0.0 dB**. "
-        "Range resolution is strictly limited by the physical pulse length."
-        )
+    shading_type = st.selectbox("Array Shading", options=["Uniform", "Hann", "Hamming", "Dolph-Chebyshev"], index=0)
+    if shading_type == "Dolph-Chebyshev":
+        cheb_attenuation = st.number_input("Desired Sidelobe Suppression (dB)", min_value=1.0, max_value=60.0,
+                                           value=30.0, step=1.0)
     else:
-        st.info(
-            f"**Pulse Type: FM (Chirp)**\n\n"
-            f"Bandwidth exceeds $1/\\tau$. The receiver's Matched Filter will compress this swept pulse, "
-            f"artificially boosting the Signal-to-Noise Ratio (SNR). \n\n"
-            f"A Pulse Compression Processing Gain of **+{10 * np.log10(time_bw_product):.1f} dB** will be applied to the detection envelope."
-        )
+        cheb_attenuation = 30.0
 
 # Dynamic Motion
-with st.sidebar.expander("Vessel Motion", expanded=True):
+with st.sidebar.expander("Vessel Motion", expanded=False):
     c1, c2, c3 = st.columns(3)
     imu_roll = c1.number_input("Roll (°)", value=0.0, step=1.0)
     imu_pitch = c2.number_input("Pitch (°)", value=0.0, step=1.0)
     imu_yaw = c3.number_input("Yaw (°)", value=0.0, step=1.0)
 
 # Static Mounting Biases
-with st.sidebar.expander("Array Mounting Biases", expanded=True):
+with st.sidebar.expander("Array Mounting Biases", expanded=False):
     st.markdown("**TX Array Biases**")
     c1, c2, c3 = st.columns(3)
     tx_roll_bias = c1.number_input("TX Roll (°)", value=0.0, step=1.0)
@@ -89,7 +107,7 @@ with st.sidebar.expander("Array Mounting Biases", expanded=True):
     rx_yaw_bias = c6.number_input("RX Yaw (°)", value=0.0, step=1.0)
 
 # Active Stabilization
-with st.sidebar.expander("Active Stabilization & Steering", expanded=True):
+with st.sidebar.expander("Active Stabilization & Steering", expanded=False):
     auto_roll = st.checkbox("Active Roll Stabilization (RX)", value=True)
     auto_pitch = st.checkbox("Active Pitch Stabilization (TX)", value=True)
     auto_yaw = st.checkbox("Active Yaw Stabilization (TX)", value=True)
@@ -98,7 +116,67 @@ with st.sidebar.expander("Active Stabilization & Steering", expanded=True):
     else:
         manual_tx_steer = 0.0
 
-with st.sidebar.expander("Acoustic Lobes", expanded=True):
+with st.sidebar.expander("Acoustic Energy", expanded=False):
+    source_level = st.number_input("Source Level (SL) [dB]", min_value=10.0, max_value=300.0, value=210.0, step=0.1)
+    noise_spectrum_level = st.number_input("Ambient Noise Spectrum Level [dB re 1µPa²/Hz]", value=40.0, step=1.0) # maybe move this to environment section
+    bs_nadir = st.number_input("Target Strength [dB]", min_value=-60.0, max_value=0.0, value=-20.0, step=1.0)
+    apply_tvg = st.checkbox("Apply TVG to Heatmap", value=True)
+
+with st.sidebar.expander("Pulse Specifications", expanded=False):
+    st.checkbox("Lock as Continuous Wave (CW)", key="cw_lock", on_change=sync_bw_from_tau,
+                help="Locks Bandwidth and Pulse Duration to Fourier inverse relationship.")
+
+    st.number_input("Total Pulse Duration (τ) [ms]", min_value=0.001, max_value=1000.0, step=0.001,
+                    key="pulse_width_ms", format="%.3f", on_change=sync_bw_from_tau)
+
+    st.selectbox("Pulse Tapering", ["Rectangular", "Tukey", "Hamming", "Hann"],
+                 key="pulse_tapering", on_change=sync_from_taper_change)
+
+    st.number_input("Bandwidth (BW) [Hz]", min_value=10.0, max_value=1000000.0, step=0.01,
+                    key="bandwidth_hz", on_change=sync_tau_from_bw)
+
+    # Variables for the Math Engine
+    pulse_width_ms = st.session_state.pulse_width_ms
+    pulse_tapering = st.session_state.pulse_tapering
+    bandwidth_hz = st.session_state.bandwidth_hz
+
+    # --- Fractional Bandwidth Hardware Check ---
+    # anything else to check besides frequency?
+    fractional_bw_percent = (bandwidth_hz / frequency) * 100.0
+
+    if fractional_bw_percent <= 10.0:
+        st.caption(
+            f"**Fractional Bandwidth:** {fractional_bw_percent:.1f}% of $f_c$\n\nSupported by standard monolithic transducers")
+    elif fractional_bw_percent <= 80.0:
+        st.caption(
+            f"**Fractional Bandwidth:** :orange[{fractional_bw_percent:.1f}% of $f_c$]\n\nRequires wideband piezo/composite arrays")
+    else:
+        st.error(
+            f"**Fractional Bandwidth:** {fractional_bw_percent:.1f}% of $f_c$\n\nWARNING: Exceeds physical limits of modern transducers (Max 80%).")
+
+    # --- Pulse Alerts ---
+    time_bw_product = bandwidth_hz * (pulse_width_ms / 1000.0)
+
+    # Physics check with .99 to account for floating point errors
+    if time_bw_product < 0.99:
+        st.error(
+            f"**Physics Error: TB = {time_bw_product:.2f}**\n\n"
+            f"A Time-Bandwidth product below 1.0 violates the Fourier uncertainty principle. "
+            f"Transmit of this pulse is impossible."
+        )
+    # Check if FM
+    elif time_bw_product > 1.5 and not st.session_state.cw_lock:
+        st.info(
+            f"**Active Mode: FM Chirp (TB = {time_bw_product:.1f})**\n\n"
+            f"* Range resolution decoupled from pulse duration.\n"
+            f"* Receiver matched filter active."
+        )
+    # Case for valid CW mode
+    elif not st.session_state.cw_lock:
+        st.success(f"**Active Mode: Custom CW Pulse (TB = {time_bw_product:.2f})**")
+
+
+with st.sidebar.expander("Acoustic Lobes", expanded=False):
     st.markdown("**Theoretical Beam Patterns (Relative dB)**")
     show_tx_solid = st.checkbox("TX Directivity Pattern (Blue)", value=True)
     if show_tx_solid and num_sectors > 1:
@@ -188,9 +266,11 @@ theta_rad = np.radians(array_relative_rx_angle)
 if shading_type == "Uniform":
     bw_factor = 0.886
 elif shading_type == "Hann":
-    bw_factor = 1.20
+    bw_factor = 1.44
 elif shading_type == "Hamming":
-    bw_factor = 1.30
+    bw_factor = 1.36
+elif shading_type == "Dolph-Chebyshev":
+    bw_factor = 0.886 * (1.0 + ((cheb_attenuation - 20.0) * 0.016667))
 
 # Calculate physical arrays based on a nominal 1500 m/s sound speed
 lambda_nom = 1500.0 / frequency
@@ -243,6 +323,9 @@ def calculate_absorption_fg(frequency_hz, T, S, D, pH, c_sound_user):
 
     # Convert from dB/km to dB/m for local spatial calculations
     return alpha_db_km / 1000.0
+
+display_alpha_db_km = calculate_absorption_fg(frequency, water_temp, salinity, depth, ph_level, c_sound) * 1000.0
+alpha_placeholder.info(f"**Absorption Coefficient (α):** {display_alpha_db_km:.2f} dB/km")
 
 # --- 3-Axis Rotation Matrix (Tait-Bryan Yaw-Pitch-Roll) ---
 def get_rotation_matrix(roll_deg, pitch_deg, yaw_deg):
@@ -308,21 +391,24 @@ def solve_mills_cross_intersection(R_tx, R_rx, tx_steer_rad, rx_steer_rad, seafl
     scale = seafloor_depth / bv_geo[2]
     return bv_geo * scale
 
-def generate_array_weights(N, shading="Hamming"):
+def generate_array_weights(N, shading="Hamming", atten_db=30.0):
     """Pre-calculates the amplitude weights for an N-element array."""
+    if N <= 1: # single element array catch
+        return np.array([1.0])
+
     n = np.arange(N)
     if shading == "Uniform":
         weights = np.ones(N)
     elif shading == "Hann":
-        # 0.5 + 0.5 cosine weighting
         weights = 0.5 * (1 - np.cos(2 * np.pi * n / (N - 1)))
     elif shading == "Hamming":
-        # 0.54 + 0.46 cosine weighting
         weights = 0.54 - 0.46 * np.cos(2 * np.pi * n / (N - 1))
+    elif shading == "Dolph-Chebyshev":
+        weights = chebwin(N, at=atten_db)
     else:
         weights = np.ones(N)
 
-    # Normalize weights so the peak main-lobe amplitude is exactly 1.0
+    # Normalize weights so the peak main-lobe amplitude is 1.0
     return weights / np.sum(weights)
 
 
@@ -361,8 +447,8 @@ comp_N_tx = max(1, min(true_N_tx, 300))
 comp_N_rx = max(1, min(true_N_rx, 300))
 
 # Pre-calculate distinct weights for TX and RX arrays
-tx_weights = generate_array_weights(comp_N_tx, shading=shading_type)
-rx_weights = generate_array_weights(comp_N_rx, shading=shading_type)
+tx_weights = generate_array_weights(comp_N_tx, shading=shading_type, atten_db=cheb_attenuation)
+rx_weights = generate_array_weights(comp_N_rx, shading=shading_type, atten_db=cheb_attenuation)
 
 def calculate_directivity(v_geo, R_mech, steer_rad, is_tx):
     """Wrapper that dynamically routes TX or RX arrays to the fast Numba math."""
@@ -498,8 +584,91 @@ if has_overlap:
     a = np.linalg.norm(vec_tx)
     b = np.linalg.norm(vec_rx)
     patch_area = np.pi * a * b
+
+    # --- Pulse Resolution & Tapering Logic ---
+
+    # Equivalent Rectangular Duration Ratios for Spatial Resolution (Energy)
+    erd_ratios = {"Rectangular": 1.0, "Tukey": 0.938, "Hamming": 0.397, "Hann": 0.375}
+    effective_pulse_duration_s = (pulse_width_ms / 1000.0) * erd_ratios.get(pulse_tapering, 1.0)
+
+    # Spectral Broadening Ratios for Bandwidth (Fourier)
+    spectral_ratios = {"Rectangular": 1.0, "Tukey": 1.06, "Hamming": 1.36, "Hann": 1.44}
+
+    # Calculate TB Product using absolute duration
+    time_bw_product = bandwidth_hz * (pulse_width_ms / 1000.0)
+
+    # Range Resolution Logic (FM vs CW)
+    if time_bw_product > 1.5:
+        range_res_m = c_sound / (2.0 * bandwidth_hz)  # FM Chirp Compressed
+    else:
+        range_res_m = c_sound * effective_pulse_duration_s / 2.0  # CW Tapered Spatial Resolution
+
+    # --- Receiver Bandwidth Noise Escalation ---
+    # Convert baseline spectrum noise into total receiver band noise (10 * log10(BW))
+    total_noise_level = noise_spectrum_level + 10 * np.log10(bandwidth_hz)
+
+    # Project pulse thickness onto flat seafloor
+    incidence_angle = abs(theta_rad)
+    projected_pulse_width = range_res_m / max(1e-6, np.sin(incidence_angle))
+
+    # Geometric across-track length of the patch
+    geo_width = 2.0 * b
+
+    is_pulse_limited = False
+    active_patch_area = patch_area
+
+    # Check if pulse is shorter than footprint
+    if projected_pulse_width < geo_width and incidence_angle >= np.radians(2.0):
+        is_pulse_limited = True
+        active_patch_area = np.pi * a * (projected_pulse_width / 2.0)
+
+    # Calculate number of pulse slices
+    num_cells = max(1, int(geo_width / projected_pulse_width))
+    num_cells = min(num_cells, 60)  # Cap for rendering performance
+
+    # Build 3D mesh polygons for pulse bands
+    pulse_slice_meshes = []
+    y_edges = np.linspace(-1.0, 1.0, num_cells + 1)
+    colors = ['rgba(0, 255, 200, 0.65)', 'rgba(150, 0, 255, 0.65)']  # Alternating Teal and Purple
+
+    for k in range(num_cells):
+        v_start = y_edges[k]
+        v_end = y_edges[k + 1]
+
+        # Ensure outer arcs have enough vertices to look smooth
+        num_pts = max(5, int(40 / num_cells))
+        v_sweep = np.linspace(v_start, v_end, num_pts)
+
+        # Calculate elliptical boundaries
+        u_right = np.sqrt(np.clip(1.0 - v_sweep ** 2, 0, 1))
+        u_left = -np.sqrt(np.clip(1.0 - v_sweep[::-1] ** 2, 0, 1))
+
+        v_poly = np.concatenate([v_sweep, v_sweep[::-1]])
+        u_poly = np.concatenate([u_right, u_left])
+
+        poly_x, poly_y, poly_z = [], [], []
+        for u, v in zip(u_poly, v_poly):
+            pt = pt_physical + vec_tx * u + vec_rx * v
+            poly_x.append(pt[0])
+            poly_y.append(pt[1])
+            poly_z.append(pt[2])
+
+        pulse_slice_meshes.append(go.Mesh3d(
+            x=poly_x, y=poly_y, z=poly_z,
+            color=colors[k % 2],
+            delaunayaxis='z',
+            hoverinfo='skip',
+            name='Pulse Length Bands' if k == 0 else None,
+            showlegend=(k == 0)
+        ))
+
 else:
     patch_area = 0.0
+    active_patch_area = 0.0
+    range_res_m = 0.0
+    is_pulse_limited = False
+    num_cells = 0
+    pulse_slice_meshes = []
 
 # --- METRICS & VALUES ---
 delta_x = pt_physical[0] - pt_calculated[0]
@@ -540,16 +709,25 @@ col2.metric("Across Dev (Y)", f"{delta_y:.2f} m")
 col3.metric("Inside TX Fan?", tx_status)
 col4.metric("Inside RX Listening Area?", rx_status)
 col5.metric("Along Track Patch Width", f"{tx_x_width:.2f} m")
-col6.metric("Sounding Patch Area", f"{patch_area:.2f} m²")
+if is_pulse_limited:
+    col6.metric("Active Area (Pulse-Limited)", f"{active_patch_area:.2f} m²")
+else:
+    col6.metric("Active Area (Beam-Limited)", f"{active_patch_area:.2f} m²")
 
 # --- Calculate Transmission Loss and Intensity for Queried Beam---
 # Convert user's sidebar items to standard SI base units
 tau_sec = pulse_width_ms / 1000.0
 bw_hz = bandwidth_hz
 
+# --- Calculate Transmission Loss and Intensity for Queried Beam---
 # Calculate Signal Processing Gain (PG)
-time_bandwidth_product = bw_hz * tau_sec
-processing_gain = 10 * np.log10(time_bandwidth_product) if time_bandwidth_product > 1.0 else 0.0
+if time_bw_product > 1.5:
+    processing_gain = 10 * np.log10(time_bw_product)
+else:
+    processing_gain = 0.0
+
+# Ensure total_noise_level is globally defined for downstream math
+total_noise_level = noise_spectrum_level + 10 * np.log10(bandwidth_hz)
 
 slant_range_m = 0.0
 alpha_db_m = 0.0
@@ -571,13 +749,13 @@ if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
     two_way_tl = spreading_loss + absorption_loss
 
     lambert_angular_decay = 10 * np.log10(np.cos(np.radians(queried_angle)) ** 2 + 1e-12)
-    area_scattering = 10 * np.log10(patch_area + 1e-12)
+    area_scattering = 10 * np.log10(active_patch_area + 1e-12)
     dynamic_ts = bs_nadir + lambert_angular_decay + area_scattering
 
     relative_intensity = dynamic_ts - two_way_tl
     absolute_pressure = source_level + relative_intensity + processing_gain
 
-    if absolute_pressure > noise_level:
+    if absolute_pressure > total_noise_level:
         status_text = ":green[Detected]"
         tvg_display = f"{dynamic_ts:.1f} dB"
     else:
@@ -595,7 +773,14 @@ st.subheader("**Theoretical Array Specifications (Nominal 1500 m/s)**")
 
 # Calculate UI variables matching the math engine
 lambda_nom_ui = 1500.0 / frequency
-bw_factor_ui = 0.886 if shading_type == "Uniform" else (1.20 if shading_type == "Hann" else 1.30)
+if shading_type == "Uniform":
+    bw_factor_ui = 0.886
+elif shading_type == "Hann":
+    bw_factor_ui = 1.44
+elif shading_type == "Hamming":
+    bw_factor_ui = 1.36
+elif shading_type == "Dolph-Chebyshev":
+    bw_factor_ui = 0.886 * (1.0 + ((cheb_attenuation - 20.0) * 0.016667))
 
 L_tx_ui = bw_factor_ui * lambda_nom_ui / np.radians(tx_beamwidth)
 L_rx_ui = bw_factor_ui * lambda_nom_ui / np.radians(rx_beamwidth)
@@ -758,13 +943,14 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
             cos_theta = abs(Z_grid[i, j]) / R
             lambert_decay = 10 * np.log10(cos_theta ** 2 + 1e-12)
 
-            pixel_ts = bs_nadir + lambert_decay + area_scattering
+            heatmap_area_scattering = 10 * np.log10(patch_area + 1e-12)
+            pixel_ts = bs_nadir + lambert_decay + heatmap_area_scattering
 
             # Calculate absolute physical pressure for this specific pixel
             pixel_absolute_pressure = source_level - two_way_tl + pixel_ts + DI_dB + processing_gain
             raw_intensity = pixel_ts - two_way_tl + DI_dB
 
-            if pixel_absolute_pressure <= noise_level:
+            if pixel_absolute_pressure <= total_noise_level:
                 Intensity_dB[i, j] = cmin_val
             else:
                 if apply_tvg:
@@ -786,7 +972,7 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
 # --- 3D Acoustic Lobes ---
 if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_combined_solid or show_combined_ghost) and np.linalg.norm(pt_physical) > 0:
     # Find max Two-Way Transmission Loss
-    max_allowable_tl = source_level + dynamic_ts + processing_gain - noise_level
+    max_allowable_tl = source_level + dynamic_ts + processing_gain - total_noise_level
 
     # Calculate absorption for lobes
     lobe_alpha_db_m = calculate_absorption_fg(frequency, water_temp, salinity, depth, ph_level, c_sound)
@@ -819,7 +1005,7 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
         else:
             v_center = np.pi / 2 - theta_rad
 
-        # Using odd numbers (151, 201) to ensure the exact center point is sampled!
+        # Using odd numbers (151, 201) to ensure exact center point is sampled
         u = np.linspace(0, np.pi, 151)
         v = np.linspace(v_center - np.radians(45), v_center + np.radians(45), 201)
         U, V = np.meshgrid(u, v)
@@ -847,7 +1033,7 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
         # Normalize and map to dB scale (-40dB Floor) for color and Solid mode
         R_dB = np.clip(20 * np.log10(R_linear + 1e-12), -40, 0)
 
-        # --- CHOOSE RADIAL SCALE BASED ON PHYSICAL MODE ---
+        # --- Choose radial scale based on physical mode ---
         if mode == "Ghost":
             # Uses linear acoustic pressure scaling. Side lobes accurately reflect their limited physical penetration in the water column.
             R_final = R_linear * lobe_scale
@@ -1107,8 +1293,12 @@ fig.add_trace(go.Scatter3d(x=[0, pt_physical[0]], y=[0, pt_physical[1]], z=[0, p
 
 fig.add_trace(go.Scatter3d(x=[pt_calculated[0]], y=[pt_calculated[1]], z=[pt_calculated[2]], mode='markers',
                            marker=dict(color='blue', size=6), name='Ideal Sounding'))
-fig.add_trace(go.Scatter3d(x=[pt_physical[0]], y=[pt_physical[1]], z=[pt_physical[2]], mode='markers',
-                           marker=dict(color='red', size=6), name='Actual Sounding'))
+
+# --- Dynamic Pulse Band Surface (Resolution Cells) ---
+if has_overlap and len(pulse_slice_meshes) > 0:
+    for mesh in pulse_slice_meshes:
+        fig.add_trace(mesh)
+
 
 # --- Visual Angle Reference Grid Tracking TX Sectors ---
 ref_angles = np.linspace(-75, 75, 11, dtype=int)  # Label every 15 degrees
