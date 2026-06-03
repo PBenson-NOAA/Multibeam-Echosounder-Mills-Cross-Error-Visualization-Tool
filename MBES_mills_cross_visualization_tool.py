@@ -576,9 +576,13 @@ if has_overlap:
     vec_tx = (tx_edge_fwd - tx_edge_aft) / 2.0
     vec_rx = (rx_edge_max - rx_edge_min) / 2.0
 
+    geom_center_tx = (tx_edge_fwd + tx_edge_aft) / 2.0
+    geom_center_rx = (rx_edge_max + rx_edge_min) / 2.0
+    patch_center = pt_physical + (geom_center_tx - pt_physical) + (geom_center_rx - pt_physical)
+
     angles = np.linspace(0, 2 * np.pi, 64)
     for alpha in angles:
-        pt = pt_physical + vec_tx * np.cos(alpha) + vec_rx * np.sin(alpha)
+        pt = patch_center + vec_tx * np.cos(alpha) + vec_rx * np.sin(alpha)
         patch_points.append(pt)
 
     a = np.linalg.norm(vec_tx)
@@ -648,7 +652,7 @@ if has_overlap:
 
         poly_x, poly_y, poly_z = [], [], []
         for u, v in zip(u_poly, v_poly):
-            pt = pt_physical + vec_tx * u + vec_rx * v
+            pt = patch_center + vec_tx * u + vec_rx * v
             poly_x.append(pt[0])
             poly_y.append(pt[1])
             poly_z.append(pt[2])
