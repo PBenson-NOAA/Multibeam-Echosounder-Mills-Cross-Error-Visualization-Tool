@@ -8,7 +8,7 @@ st.set_page_config(layout="wide", page_title="Multibeam Echosounder Mills Cross 
 
 st.title("Multibeam Echosounder Mills Cross Simulator")
 st.markdown(
-    "A visual aid to assess the impact of mechanical biases, dynamic IMU motion, and active beam steering on a flat seafloor baseline.")
+    "A visual aid to assess the impact of mechanical biases, dynamic motion, and active beam steering on a flat seafloor baseline.")
 
 # --- Session State for pulse characteristics ---
 if "pulse_width_ms" not in st.session_state:
@@ -74,10 +74,6 @@ with st.sidebar.expander("Array Specifications", expanded=False):
     rx_beamwidth = c1.number_input("RX BW (Across-Track) (°)", value=1.0, step=0.1)
     tx_across_fan_bw = c2.number_input("TX BW (Across-Track) (°)", value=150.0, step=1.0)
     rx_fore_aft_bw = c2.number_input("RX BW (Along-Track) (°)", value=30.0, step=1.0)
-
-    target_swath_width = st.number_input("Target Swath Coverage (°)", min_value=10.0, max_value=150.0, value=120.0, step=1.0)
-    num_sectors = st.selectbox("Number of TX Sectors", options=[1, 2, 3, 4, 5, 8], index=0)
-
     shading_type = st.selectbox("Array Shading", options=["Uniform", "Hann", "Hamming", "Dolph-Chebyshev"], index=0)
     if shading_type == "Dolph-Chebyshev":
         cheb_attenuation = st.number_input("Desired Sidelobe Suppression (dB)", min_value=1.0, max_value=60.0,
@@ -106,18 +102,17 @@ with st.sidebar.expander("Array Mounting Biases", expanded=False):
     rx_pitch_bias = c5.number_input("RX Pitch (°)", value=0.0, step=1.0)
     rx_yaw_bias = c6.number_input("RX Yaw (°)", value=0.0, step=1.0)
 
-# Active Stabilization
-with st.sidebar.expander("Active Stabilization & Steering", expanded=False):
-    auto_roll = st.checkbox("Active Roll Stabilization (RX)", value=True)
-    auto_pitch = st.checkbox("Active Pitch Stabilization (TX)", value=True)
-    auto_yaw = st.checkbox("Active Yaw Stabilization (TX)", value=True)
-    if not auto_pitch:
-        manual_tx_steer = st.number_input("Manual TX Pitch Steer (°)", value=0.0, step=0.1)
-    else:
-        manual_tx_steer = 0.0
+# Motion Stabilization
+with st.sidebar.expander("Motion Stabilization", expanded=False):
+    auto_roll = st.checkbox("Roll Stabilization (RX)", value=True)
+    auto_pitch = st.checkbox("Pitch Stabilization (TX)", value=True)
+    auto_yaw = st.checkbox("Yaw Stabilization (TX)", value=True)
+    target_swath_width = st.number_input("Target Swath Coverage (°)", min_value=10.0, max_value=150.0, value=120.0,
+                                         step=1.0, help="Sets the range for actual/ideal soundings based on course over ground (CoG is always aligned with graph y-axis).")
+    num_sectors = st.selectbox("Number of TX Sectors", options=[1, 2, 3, 4, 5, 8], index=0)
 
 with st.sidebar.expander("Acoustic Energy", expanded=False):
-    source_level = st.number_input("Source Level (SL) [dB]", min_value=10.0, max_value=300.0, value=210.0, step=0.1)
+    source_level = st.number_input("Source Level [dB]", min_value=10.0, max_value=300.0, value=210.0, step=0.1)
     noise_spectrum_level = st.number_input("Ambient Noise Spectrum Level [dB re 1µPa²/Hz]", value=40.0, step=1.0) # maybe move this to environment section
     bs_nadir = st.number_input("Target Strength [dB]", min_value=-60.0, max_value=0.0, value=-20.0, step=1.0)
     apply_tvg = st.checkbox("Apply TVG to Heatmap", value=True)
@@ -193,7 +188,7 @@ with st.sidebar.expander("Acoustic Lobes", expanded=False):
     show_rx_ghost = st.checkbox("RX Noise-Limited Range", value=False)
     show_combined_ghost = st.checkbox("Combined Detection Envelope", value=False)
 
-# --- MATH & GEOMETRY ---
+# --- Math & Geometry ---
 # True Mechanical Orientations (IMU Dynamic Motion + Static Mounting Biases)
 true_tx_roll = imu_roll + tx_roll_bias
 true_tx_pitch = imu_pitch + tx_pitch_bias
@@ -224,8 +219,6 @@ def get_sector_steering(sector_center_angle):
 
         # Clip to mechanical/electronic hardware limits
         steer_deg = np.clip(steer_deg, -10.0, 10.0)
-    else:
-        steer_deg = manual_tx_steer
 
     if auto_yaw:
         # Yaw steering math
@@ -662,7 +655,7 @@ if has_overlap:
             color=colors[k % 2],
             delaunayaxis='z',
             hoverinfo='skip',
-            name='Pulse Duration Bands' if k == 0 else None,
+            name='Pulse Footprints' if k == 0 else None,
             showlegend=(k == 0)
         ))
 
@@ -724,7 +717,7 @@ tau_sec = pulse_width_ms / 1000.0
 bw_hz = bandwidth_hz
 
 # --- Calculate Transmission Loss and Intensity for Queried Beam---
-# Calculate Signal Processing Gain (PG)
+# Calculate Signal Processing Gain via method described in "Sonar for Practising Engineers" by A.D. Waite
 if time_bw_product > 1.5:
     processing_gain = 10 * np.log10(time_bw_product)
 else:
@@ -818,11 +811,11 @@ st.markdown("---")
 st.subheader("Visualization Overlays")
 
 # condense toggles to left side of screen
-t_col1, t_col2, t_col3, t_col4, t_col5, t_col6, t_col7, t_col8, spacer = st.columns([1.5, 1.5, 1.2, 1.2, 2.0, 2.0, 2.0, 2.0, 3.0])
+t_col1, t_col2, t_col3, t_col4, t_col5, t_col6, t_col7, spacer = st.columns([1.7, 1.8, 2.2, 1.5, 1.9, 2.0, 1.8, 10.0])
 
-show_ideal_tx = t_col1.checkbox("Ideal TX Sectors", value=True)
+show_ideal_tx = t_col1.checkbox("Ideal TX Sectors", value=False)
 show_actual_tx = t_col2.checkbox("Actual TX Sectors", value=True)
-show_rx_bowtie = t_col3.checkbox("RX Bowtie", value=True)
+show_rx_listening_env = t_col3.checkbox("RX Listening Envelope", value=True)
 show_rx_red = t_col4.checkbox("RX Footprint", value=True)
 show_ideal_soundings = t_col5.checkbox("Ideal Soundings (100 beams)", value=False)
 show_actual_soundings = t_col6.checkbox("Actual Soundings (100 beams)", value=False)
@@ -830,7 +823,8 @@ show_heatmap = t_col7.checkbox("Show Seafloor Heatmap (dB)", value=True)
 
 
 # --- Equidistant beam math (100 beams for simplicity) ---
-# This is currently NOT properly functional for all axes of motion stabilization.
+# I believe this implementation is now fixed! However, not sure if this is best controlled by user from "target swath coverage" - might be counterintuitive,
+# and/or my method could just be wrong.
 ideal_sounding_dots = []
 actual_sounding_dots = []
 
@@ -842,48 +836,62 @@ if show_ideal_soundings or show_actual_soundings:
     beam_y_coords = np.linspace(-max_y, max_y, 100)
 
     for y_coord in beam_y_coords:
-        # Back-calculate the nominal angle to determine which sector panel this target coordinate falls into
-        b_angle_nominal = np.degrees(np.arctan(y_coord / depth))
 
-        sector_center = 0.0
-        for s_start, s_end in sector_limits:
-            if s_start <= b_angle_nominal <= s_end:
-                sector_center = (s_start + s_end) / 2.0
-                break
-
-        # Get the steering angle command for this specific sector panel
-        steer_rad = get_sector_steering(sector_center)
-
-        # Back projection and swath truncation
-        # Define 3D target coordinate on the flat seafloor
-        v_target_global = np.array([depth * np.tan(steer_rad), y_coord, depth])
-
-        # Push global target backwards into the array's local frame
-        if auto_roll:
-            v_target_local = np.dot(R_rx_ideal.T, v_target_global)
-        else:
-            v_target_local = v_target_global
-
-        # Calculate electronic receive angle needed to hit local coordinate
-        b_rad = np.arcsin(np.clip(v_target_local[1] / np.linalg.norm(v_target_local), -1.0, 1.0))
-
-        max_rx_hardware_angle = 75.0
-
-        # Drop beam to dynamically truncate the swath if exceeded
-        if abs(np.degrees(b_rad)) > max_rx_hardware_angle:
-            continue
-
-        # Ideal Soundings
         if show_ideal_soundings:
-            pt_id = solve_mills_cross_intersection(R_tx_ideal, R_rx_ideal, steer_rad, b_rad, depth)
-            if np.linalg.norm(pt_id) > 0:
-                ideal_sounding_dots.append(pt_id)
+            for s_start, s_end in sector_limits:
+                sector_center = (s_start + s_end) / 2.0
+                steer_rad = get_sector_steering(sector_center)
 
-        # Actual Soundings
+                # Global target assuming this specific sector's pitch steer
+                v_target_global = np.array([depth * np.tan(steer_rad), y_coord, depth])
+
+                if auto_roll:
+                    v_target_local = np.dot(R_rx_ideal.T, v_target_global)
+                else:
+                    v_target_local = v_target_global
+
+                b_rad = np.arcsin(np.clip(v_target_local[1] / np.linalg.norm(v_target_local), -1.0, 1.0))
+
+                if abs(np.degrees(b_rad)) > 75.0:
+                    continue
+
+                pt_id = solve_mills_cross_intersection(R_tx_ideal, R_rx_ideal, steer_rad, b_rad, depth)
+                if np.linalg.norm(pt_id) > 0:
+                    v_local_id = np.dot(R_tx_ideal.T, pt_id / np.linalg.norm(pt_id))
+                    across_angle_id = np.degrees(np.arcsin(np.clip(v_local_id[1], -1.0, 1.0)))
+
+                    # Check if landed in sector boundary
+                    if s_start <= across_angle_id <= s_end:
+                        ideal_sounding_dots.append(pt_id)
+                        break  # Match found, move to next Y coordinate
+
         if show_actual_soundings:
-            pt_ac = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, steer_rad, b_rad, depth)
-            if np.linalg.norm(pt_ac) > 0:
-                actual_sounding_dots.append(pt_ac)
+            for s_start, s_end in sector_limits:
+                sector_center = (s_start + s_end) / 2.0
+                steer_rad = get_sector_steering(sector_center)
+
+                # Global target assuming this specific sector's pitch steer
+                v_target_global = np.array([depth * np.tan(steer_rad), y_coord, depth])
+
+                if auto_roll:
+                    v_target_local = np.dot(R_rx_ideal.T, v_target_global)
+                else:
+                    v_target_local = v_target_global
+
+                b_rad = np.arcsin(np.clip(v_target_local[1] / np.linalg.norm(v_target_local), -1.0, 1.0))
+
+                if abs(np.degrees(b_rad)) > 75.0:
+                    continue
+
+                pt_ac = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, steer_rad, b_rad, depth)
+                if np.linalg.norm(pt_ac) > 0:
+                    v_local_ac = np.dot(R_tx_mech.T, pt_ac / np.linalg.norm(pt_ac))
+                    across_angle_ac = np.degrees(np.arcsin(np.clip(v_local_ac[1], -1.0, 1.0)))
+
+                    # check if landed in sector boundary
+                    if s_start <= across_angle_ac <= s_end:
+                        actual_sounding_dots.append(pt_ac)
+                        break  # Match found, move to next Y coordinate
 
 # --- 3D Visualization ---
 fig = go.Figure()
@@ -1160,7 +1168,7 @@ if show_ideal_tx:
         ))
 
 # --- RX Listening Region ---
-if show_rx_bowtie:
+if show_rx_listening_env:
     theta_sweep = np.linspace(-np.radians(80.0), np.radians(80.0), 60)
     phi_sweep = np.linspace(-rx_acceptance_rad, rx_acceptance_rad, 25)
 
@@ -1245,7 +1253,7 @@ fig.add_trace(go.Scatter3d(
     z=[tx_global_start[2], tx_global_end[2]],
     mode='lines',
     line=dict(color='blue', width=10),
-    name='Physical TX Array (Keel)'
+    name='Physical TX Array'
 ))
 
 # Physical RX Array (Aligned along Y-axis locally, rotated by R_rx_mech)
@@ -1260,7 +1268,7 @@ fig.add_trace(go.Scatter3d(
     z=[rx_global_start[2], rx_global_end[2]],
     mode='lines',
     line=dict(color='red', width=10),
-    name='Physical RX Array (Beam)'
+    name='Physical RX Array'
 ))
 
 # Vessel Bow Arrow (Follows where bow would point under motion)
@@ -1294,9 +1302,6 @@ fig.add_trace(go.Scatter3d(x=[0, pt_calculated[0]], y=[0, pt_calculated[1]], z=[
                            line=dict(color='blue', width=4), name='Ideal Pointing Vector'))
 fig.add_trace(go.Scatter3d(x=[0, pt_physical[0]], y=[0, pt_physical[1]], z=[0, pt_physical[2]], mode='lines',
                            line=dict(color='red', width=6), name='Actual Pointing Vector'))
-
-fig.add_trace(go.Scatter3d(x=[pt_calculated[0]], y=[pt_calculated[1]], z=[pt_calculated[2]], mode='markers',
-                           marker=dict(color='blue', size=6), name='Ideal Sounding'))
 
 # --- Dynamic Pulse Band Surface (Resolution Cells) ---
 if has_overlap and len(pulse_slice_meshes) > 0:
@@ -1365,7 +1370,7 @@ if show_ideal_soundings and len(ideal_sounding_dots) > 0:
         z=[p[2] for p in ideal_sounding_dots],
         mode='markers',
         marker=dict(color='darkblue', size=3.5, symbol='circle'),
-        name='Ideal Sounding Points',
+        name='Ideal Soundings',
         showlegend=True
     ))
 
@@ -1377,7 +1382,7 @@ if show_actual_soundings and len(actual_sounding_dots) > 0:
         z=[p[2] for p in actual_sounding_dots],
         mode='markers',
         marker=dict(color='darkorange', size=3.5, symbol='circle'),
-        name='Actual Sounding Points',
+        name='Actual Soundings',
         showlegend=True
     ))
 
