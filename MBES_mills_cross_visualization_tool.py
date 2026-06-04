@@ -48,6 +48,44 @@ def sync_from_taper_change():
     if st.session_state.cw_lock:
         sync_bw_from_tau()
 
+# --- Mackenzie (1981) Empirical Sound Speed Math ---
+def mackenzie_sv(T, S):
+    """Calculates Surface Sound Speed from Temp and Salinity (Depth = 0m)"""
+    D = 0.0
+    c = (1448.96 + 4.591 * T - 0.05304 * T**2 + 2.374e-4 * T**3 +
+         1.340 * (S - 35.0) + 0.0163 * D + 1.675e-7 * D**2 -
+         0.01025 * T * (S - 35.0) - 7.139e-13 * T * D**3)
+    return max(1400.0, min(c, 1600.0))
+
+def mackenzie_salinity(c, T):
+    """Calculates Surface Salinity from Sound Speed and Temp (Depth = 0m)"""
+    D = 0.0
+    poly = (1448.96 + 4.591 * T - 0.05304 * T**2 + 2.374e-4 * T**3 +
+            0.0163 * D + 1.675e-7 * D**2 - 7.139e-13 * T * D**3)
+    S = 35.0 + (c - poly) / (1.340 - 0.01025 * T)
+    return max(5.0, min(S, 50.0))
+
+# --- Environment Session State ---
+if "env_temp" not in st.session_state:
+    st.session_state.env_temp = 18.0  # Set your desired startup temperature
+if "env_sv" not in st.session_state:
+    st.session_state.env_sv = 1500.0  # Set your desired startup sound speed
+if "env_sal" not in st.session_state:
+    st.session_state.env_sal = mackenzie_salinity(1500.0, 18.0)
+
+# --- Callbacks for Bidirectional UI ---
+def update_from_salinity():
+    """Triggered when Salinity is manually changed"""
+    st.session_state.env_sv = mackenzie_sv(st.session_state.env_temp, st.session_state.env_sal)
+
+def update_from_sv():
+    """Triggered when Sound Speed is manually changed"""
+    st.session_state.env_sal = mackenzie_salinity(st.session_state.env_sv, st.session_state.env_temp)
+
+def update_from_temp():
+    """Triggered when Temp changes. Defaults to updating SV, assuming Salinity is static."""
+    st.session_state.env_sv = mackenzie_sv(st.session_state.env_temp, st.session_state.env_sal)
+
 
 # --- SIDEBAR INTERFACE ---
 st.sidebar.header("Parameters")
@@ -58,11 +96,19 @@ with st.sidebar.container(border=True):
     queried_angle = st.number_input("Query Specific Swath Angle (°)", min_value=-75.0, max_value=75.0, value=45.0, step=1.0)
 
 with st.sidebar.expander("Environment", expanded=False):
-    depth = st.number_input("Depth (m)", min_value=1.0, max_value=12000.0, value=25.0, step=1.0)
-    c_sound = st.number_input("Sound Speed (m/s)", min_value=1400.0, max_value=1600.0, value=1500.0, step=1.0)
-    water_temp = st.number_input("Water Temperature (°C)", min_value=-2.0, max_value=40.0, value=10.0, step=1.0)
-    salinity = st.number_input("Salinity (ppt)", min_value=0.0, max_value=50.0, value=35.0, step=1.0)
-    ph_level = st.number_input("pH", min_value=5.0, max_value=10.0, value=8.1, step=0.1)
+    depth = st.number_input("Depth (m)", min_value=1.0, max_value=12000.0, value=25.0, step=0.01)
+    c_sound = st.number_input("Sound Speed (m/s)", min_value=1400.0, max_value=1600.0, value=1500.0, step=0.01, key="env_sv", on_change=update_from_sv)
+    water_temp = st.number_input("Water Temperature (°C)", min_value=-6.0, max_value=35.0, value=10.0, step=0.01, key="env_temp", on_change=update_from_temp)
+    salinity = st.number_input("Salinity (ppt)", min_value=5.0, max_value=50.0, value=35.0, step=0.01, key="env_sal", on_change=update_from_salinity)
+    ph_level = 8.0 # hard coding this for simplicity at this point in time, due to negligible effect on most common MBES frequencies
+
+    if st.session_state.env_sal <= 5.0 or st.session_state.env_sal >= 50.0:
+        st.warning(
+            "**Physics Limit:** The calculated Salinity has hit boundary limits. Check Sound Speed and Temperature combination.")
+
+    if st.session_state.env_sv <= 1400.0 or st.session_state.env_sv >= 1600.0:
+        st.warning(
+            "**Physics Limit:** The calculated Sound Speed has hit boundary limits. Check Temperature and Salinity combination.")
 
     alpha_placeholder = st.empty()
 
@@ -89,14 +135,14 @@ with st.sidebar.expander("Vessel Motion", expanded=False):
     imu_yaw = c3.number_input("Yaw (°)", value=0.0, step=1.0)
 
 # Static Mounting Biases
-with st.sidebar.expander("Array Mounting Biases", expanded=False):
-    st.markdown("**TX Array Biases**")
+with st.sidebar.expander("Array Mounting Errors", expanded=False):
+    st.markdown("**TX Array Mounting Errors**")
     c1, c2, c3 = st.columns(3)
     tx_roll_bias = c1.number_input("TX Roll (°)", value=0.0, step=1.0)
     tx_pitch_bias = c2.number_input("TX Pitch (°)", value=0.0, step=1.0)
     tx_yaw_bias = c3.number_input("TX Yaw (°)", value=0.0, step=1.0)
 
-    st.markdown("**RX Array Biases**")
+    st.markdown("**RX Array Mounting Errors**")
     c4, c5, c6 = st.columns(3)
     rx_roll_bias = c4.number_input("RX Roll (°)", value=0.0, step=1.0)
     rx_pitch_bias = c5.number_input("RX Pitch (°)", value=0.0, step=1.0)
@@ -107,8 +153,8 @@ with st.sidebar.expander("Motion Stabilization", expanded=False):
     auto_roll = st.checkbox("Roll Stabilization (RX)", value=True)
     auto_pitch = st.checkbox("Pitch Stabilization (TX)", value=True)
     auto_yaw = st.checkbox("Yaw Stabilization (TX)", value=True)
-    target_swath_width = st.number_input("Target Swath Coverage (°)", min_value=10.0, max_value=150.0, value=120.0,
-                                         step=1.0, help="Sets the range for actual/ideal soundings based on course over ground (CoG is always aligned with graph y-axis).")
+    target_swath_width = st.number_input("Stabilized Swath Coverage (°)", min_value=10.0, max_value=150.0, value=120.0,
+                                         step=1.0, help="Sets the range of accepted soundings when motion stabilization is active (coverage in degrees is in reference to the system at 0° pitch, 0° roll, and 0° yaw).")
     num_sectors = st.selectbox("Number of TX Sectors", options=[1, 2, 3, 4, 5, 8], index=0)
 
 with st.sidebar.expander("Acoustic Energy", expanded=False):
