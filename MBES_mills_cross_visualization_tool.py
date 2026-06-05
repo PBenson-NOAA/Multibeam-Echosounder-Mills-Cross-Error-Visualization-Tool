@@ -216,8 +216,8 @@ with st.sidebar.expander("Pulse Specifications", expanded=False):
     elif not st.session_state.cw_lock:
         st.success(f"**Active Mode: Custom CW Pulse (TB = {time_bw_product:.2f})**")
 
-
 with st.sidebar.expander("Acoustic Lobes", expanded=False):
+
     st.markdown("**Theoretical Beam Patterns (Relative dB)**")
     show_tx_solid = st.checkbox("TX Directivity Pattern (Blue)", value=True)
     if show_tx_solid and num_sectors > 1:
@@ -233,6 +233,14 @@ with st.sidebar.expander("Acoustic Lobes", expanded=False):
             "Note: The 3D TX lobe display does not support simultaneous multi-sector visualization. It currently renders the active queried sector only.")
     show_rx_ghost = st.checkbox("RX Noise-Limited Range", value=False)
     show_combined_ghost = st.checkbox("Combined Detection Envelope", value=False)
+    # Commenting out the below snippet because I originally added the total swath envelope view as a toggle,
+    # but realized it was clearly better at visualizing the limit than the simple expansion/shrinking method done only at the queried beam angle.
+    # lobe_calc_mode = st.radio(
+    #     "Lobe Range Boundary Mode",
+    #     options=["Queried Beam Capacity", "Total Swath Envelope"],
+    #     help="Queried Capacity shows the isolated limit of the selected beam. Total Envelope applies Lambertian decay across the entire footprint."
+    # )
+    lobe_calc_mode = "Total Swath Envelope"
 
 # --- Math & Geometry ---
 # True Mechanical Orientations (IMU Dynamic Motion + Static Mounting Biases)
@@ -757,10 +765,6 @@ if is_pulse_limited:
 else:
     col6.metric("Active Area (Beam-Limited)", f"{active_patch_area:.2f} m²")
 
-# --- Calculate Transmission Loss and Intensity for Queried Beam---
-# Convert user's sidebar items to standard SI base units
-tau_sec = pulse_width_ms / 1000.0
-bw_hz = bandwidth_hz
 
 # --- Calculate Transmission Loss and Intensity for Queried Beam---
 # Calculate Signal Processing Gain via method described in "Sonar for Practising Engineers" by A.D. Waite
@@ -1036,22 +1040,57 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
     lobe_alpha_db_m = calculate_absorption_fg(frequency, water_temp, salinity, depth, ph_level, c_sound)
 
     # Iterative Binary Solver to find Maximum Detection Range (R_max)
-    if max_allowable_tl <= 0:
-        lobe_scale = 1.0  # Signal is DOA
+    if lobe_calc_mode == "Queried Beam Capacity":
+        if max_allowable_tl <= 0:
+            lobe_scale = 1.0  # Signal is DOA
+        else:
+            r_min, r_max = 1.0, 20000.0
+            for _ in range(50):
+                r_mid = (r_min + r_max) / 2.0
+                tl_test = 40 * np.log10(r_mid) + 2 * lobe_alpha_db_m * r_mid
+                if tl_test < max_allowable_tl:
+                    r_min = r_mid
+                else:
+                    r_max = r_mid
+            lobe_scale = r_mid
+
     else:
-        r_min = 1.0
-        r_max = 20000.0
+        # Total Swath Envelope: Pre-calculate a lookup table from 0 to 90 degrees
+        interp_angles_rad = np.linspace(0, np.pi / 2, 91)
+        interp_r_max = np.zeros_like(interp_angles_rad)
 
-        for _ in range(50):
-            r_mid = (r_min + r_max) / 2.0
-            tl_test = 40 * np.log10(r_mid) + 2 * lobe_alpha_db_m * r_mid
+        for idx, ang_rad in enumerate(interp_angles_rad):
+            # Recalculate Target Strength for this specific angle
+            lamb_decay = 10 * np.log10(np.cos(ang_rad) ** 2 + 1e-12)
 
-            if tl_test < max_allowable_tl:
-                r_min = r_mid
+            # Approximate Ensonified Area transition (Beam vs Pulse limited)
+            projected_pw = range_res_m / max(1e-6, np.sin(ang_rad))
+            b_half = (depth * np.tan(dynamic_rx_bw_rad / 2)) / np.cos(ang_rad) ** 2
+            a_half = (depth * np.tan(dynamic_tx_bw_rad / 2))
+
+            geo_width = 2.0 * b_half
+            if projected_pw < geo_width and ang_rad >= np.radians(2.0):
+                area = np.pi * a_half * (projected_pw / 2.0)
             else:
-                r_max = r_mid
+                area = np.pi * a_half * b_half
 
-        lobe_scale = r_mid
+            area_scat = 10 * np.log10(area + 1e-12)
+            ts_angle = bs_nadir + lamb_decay + area_scat
+
+            angle_max_tl = source_level + ts_angle + processing_gain - total_noise_level
+
+            if angle_max_tl <= 0:
+                interp_r_max[idx] = 1.0
+            else:
+                r_min, r_max_test = 1.0, 20000.0
+                for _ in range(35):  # 35 iterations should be ok for precision
+                    r_mid = (r_min + r_max_test) / 2.0
+                    tl_test = 40 * np.log10(r_mid) + 2 * lobe_alpha_db_m * r_mid
+                    if tl_test < angle_max_tl:
+                        r_min = r_mid
+                    else:
+                        r_max_test = r_mid
+                interp_r_max[idx] = r_mid
 
 
     def generate_native_lobe(is_tx, color_scale, name, mode="Ghost"):
@@ -1063,7 +1102,7 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
         else:
             v_center = np.pi / 2 - theta_rad
 
-        # Using odd numbers (151, 201) to ensure exact center point is sampled
+        # Using odd numbers (151, 201) to ensure center point is sampled
         u = np.linspace(0, np.pi, 151)
         v = np.linspace(v_center - np.radians(45), v_center + np.radians(45), 201)
         U, V = np.meshgrid(u, v)
@@ -1093,8 +1132,12 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
 
         # --- Choose radial scale based on physical mode ---
         if mode == "Ghost":
-            # Uses linear acoustic pressure scaling. Side lobes accurately reflect their limited physical penetration in the water column.
-            R_final = R_linear * lobe_scale
+            if lobe_calc_mode == "Queried Beam Capacity":
+                R_final = R_linear * lobe_scale
+            else:
+                incidence_angles = np.arccos(np.clip(np.abs(Z_unit), 0.0, 1.0))
+                dynamic_lobe_scale = np.interp(incidence_angles, interp_angles_rad, interp_r_max)
+                R_final = R_linear * dynamic_lobe_scale
             surface_opacity = 0.15
 
         elif mode == "Solid":
@@ -1158,10 +1201,13 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
         # Normalize to full dB scale
         R_dB = np.clip(20 * np.log10(R_comb_linear + 1e-12), -40, 0)
 
-        # --- Choose radial scale based on mode ---
         if mode == "Ghost":
-            # Two-way acoustic propagation boundary scale
-            R_final = R_comb_linear * lobe_scale
+            if lobe_calc_mode == "Queried Beam Capacity":
+                R_final = R_comb_linear * lobe_scale
+            else:
+                incidence_angles = np.arccos(np.clip(np.abs(Z_comb), 0.0, 1.0))
+                dynamic_lobe_scale = np.interp(incidence_angles, interp_angles_rad, interp_r_max)
+                R_final = R_comb_linear * dynamic_lobe_scale
             surface_opacity = 0.25
 
         elif mode == "Solid":
