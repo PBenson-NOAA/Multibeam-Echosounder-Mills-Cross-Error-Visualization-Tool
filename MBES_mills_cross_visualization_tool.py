@@ -4,6 +4,15 @@ import plotly.graph_objects as go
 from numba import njit
 from scipy.signal.windows import chebwin
 
+# Current next steps are:
+# 1. Refining descriptive language to nearly every function.
+# 2. Refining consistent terminology throughout for better clarity.
+# 3. Split up metrics to be better organized by what controls them and what they measure. Probably grouping and "help" descriptions.
+# 4. Reorganize sidebar to group swath coverage somewhere better - Done. Made significant sidebar grouping improvements
+# 5. Rename assumed SSV to something better. It also probably doesn't need its own sidebar section. - Not renaming for now. Also keeping in current section for time being.
+# 6. Read through code and adjust or elaborate on comments as needed.
+
+
 st.set_page_config(layout="wide", page_title="Multibeam Echosounder Mills Cross Simulator")
 
 st.title("Multibeam Echosounder Mills Cross Simulator")
@@ -67,13 +76,13 @@ def mackenzie_salinity(c, T):
 
 # --- Environment Session State ---
 if "env_temp" not in st.session_state:
-    st.session_state.env_temp = 18.0  # Set your desired startup temperature
+    st.session_state.env_temp = 18.0
 if "env_sv" not in st.session_state:
-    st.session_state.env_sv = 1500.0  # Set your desired startup sound speed
+    st.session_state.env_sv = 1500.0
 if "env_sal" not in st.session_state:
     st.session_state.env_sal = mackenzie_salinity(1500.0, 18.0)
 
-# --- Callbacks for Bidirectional UI ---
+# --- Callbacks for Environment Variables ---
 def update_from_salinity():
     """Triggered when Salinity is manually changed"""
     st.session_state.env_sv = mackenzie_sv(st.session_state.env_temp, st.session_state.env_sal)
@@ -86,15 +95,44 @@ def update_from_temp():
     """Triggered when Temp changes. Defaults to updating SV, assuming Salinity is static."""
     st.session_state.env_sv = mackenzie_sv(st.session_state.env_temp, st.session_state.env_sal)
 
+# --- Sediment Session State & Callbacks ---
+if "sediment_type" not in st.session_state:
+    st.session_state.sediment_type = "Sand"
+if "bs_base" not in st.session_state:
+    st.session_state.bs_base = -30.0
+if "bs_spec" not in st.session_state:
+    st.session_state.bs_spec = 10.0
+if "crit_angle_deg" not in st.session_state:
+    st.session_state.crit_angle_deg = 15.0
+
+def update_from_sediment_preset():
+    """Triggered when user selects a standard sediment type from the dropdown."""
+    sed = st.session_state.sediment_type
+    if sed == "Mud":
+        st.session_state.bs_base = -40.0
+        st.session_state.bs_spec = 20.0
+        st.session_state.crit_angle_deg = 5.0
+    elif sed == "Sand":
+        st.session_state.bs_base = -30.0
+        st.session_state.bs_spec = 10.0
+        st.session_state.crit_angle_deg = 15.0
+    elif sed == "Gravel":
+        st.session_state.bs_base = -20.0
+        st.session_state.bs_spec = 5.0
+        st.session_state.crit_angle_deg = 25.0
+
+def update_to_custom_sediment():
+    """Triggered when user manually changes any of the numeric target strength sliders."""
+    st.session_state.sediment_type = "Custom"
 
 # --- SIDEBAR INTERFACE ---
-st.sidebar.header("Parameters")
-
 # Query beam information
 with st.sidebar.container(border=True):
     st.subheader("Interactive Beam Query")
-    queried_angle = st.number_input("Query Specific Swath Angle (°)", min_value=-75.0, max_value=75.0, value=45.0, step=1.0)
+    queried_angle = st.number_input("Query Array Relative Swath Angle (°)", min_value=-75.0, max_value=75.0, value=45.0, step=1.0)
 
+
+st.sidebar.header("Environment and Seafloor Characteristics")
 with st.sidebar.expander("Environment", expanded=False):
     depth = st.number_input("Depth (m)", min_value=1.0, max_value=12000.0, value=25.0, step=0.01)
     c_sound = st.number_input("Sound Speed (m/s)", min_value=1400.0, max_value=1600.0, value=1500.0, step=0.01, key="env_sv", on_change=update_from_sv)
@@ -111,57 +149,91 @@ with st.sidebar.expander("Environment", expanded=False):
             "**Physics Limit:** The calculated Sound Speed has hit boundary limits. Check Temperature and Salinity combination.")
 
     alpha_placeholder = st.empty()
+    assumed_sv = st.number_input(
+            "Assumed Surface Sound Speed (m/s)",
+            min_value=1400.0, max_value=1600.0, value=1500.0, step=0.1,
+            help="The surface sound speed value used by the acquisition software. If this differs from the true surface sound speed, refraction artifacts will appear. Note that this will also impact the launch angle of a given beam from the transducer, if different from the real surface sound speed."
+        )
 
+with st.sidebar.expander("Seafloor Target Strength", expanded=False):
+    st.selectbox("Sediment Type",
+                 options=["Mud", "Sand", "Gravel", "Custom"],
+                 key="sediment_type",
+                 on_change=update_from_sediment_preset)
 
-with st.sidebar.expander("Array Specifications", expanded=False):
-    c1, c2 = st.columns(2)
-    frequency = st.number_input("Frequency (Hz)", min_value=1000.0, max_value=1000000.0, value=300000.0, step=1000.0)
-    tx_beamwidth = c1.number_input("TX BW (Along-Track) (°)", value=0.5, step=0.1)
-    rx_beamwidth = c1.number_input("RX BW (Across-Track) (°)", value=1.0, step=0.1)
-    tx_across_fan_bw = c2.number_input("TX BW (Across-Track) (°)", value=150.0, step=1.0)
-    rx_fore_aft_bw = c2.number_input("RX BW (Along-Track) (°)", value=30.0, step=1.0)
-    shading_type = st.selectbox("Array Shading", options=["Uniform", "Hann", "Hamming", "Dolph-Chebyshev"], index=0)
-    if shading_type == "Dolph-Chebyshev":
-        cheb_attenuation = st.number_input("Desired Sidelobe Suppression (dB)", min_value=1.0, max_value=60.0,
-                                           value=30.0, step=1.0)
-    else:
-        cheb_attenuation = 30.0
+    # dynamically linked inputs
+    bs_base = st.number_input("Bottom Backscatter Strength [dB]",
+                              key="bs_base", step=1.0,
+                              on_change=update_to_custom_sediment)
 
+    bs_spec = st.number_input("Specular Strength [dB]",
+                              min_value=0.0, max_value=40.0,
+                              key="bs_spec", step=1.0,
+                              on_change=update_to_custom_sediment)
+
+    crit_angle_deg = st.number_input("Critical Angle [°]",
+                                     min_value=1.0, max_value=90.0,
+                                     key="crit_angle_deg", step=1.0,
+                                     on_change=update_to_custom_sediment)
+
+    # Convert to rads for the math engine
+    crit_angle_rad = np.radians(crit_angle_deg)
+
+    apply_tvg = st.checkbox("Apply TVG to Heatmap", value=True)
+
+st.sidebar.header("Vessel Motion and Alignment")
 # Dynamic Motion
 with st.sidebar.expander("Vessel Motion", expanded=False):
     c1, c2, c3 = st.columns(3)
-    imu_roll = c1.number_input("Roll (°)", value=0.0, step=1.0)
-    imu_pitch = c2.number_input("Pitch (°)", value=0.0, step=1.0)
-    imu_yaw = c3.number_input("Yaw (°)", value=0.0, step=1.0)
+    imu_roll = c1.number_input("Roll (°)", min_value=-45.0, max_value=45.0, value=0.0, step=1.0)
+    imu_pitch = c2.number_input("Pitch (°)", min_value=-45.0, max_value=45.0, value=0.0, step=1.0)
+    imu_yaw = c3.number_input("Yaw (°)", min_value=-45.0, max_value=45.0, value=0.0, step=1.0)
 
 # Static Mounting Biases
 with st.sidebar.expander("Array Mounting Errors", expanded=False):
     st.markdown("**TX Array Mounting Errors**")
     c1, c2, c3 = st.columns(3)
-    tx_roll_bias = c1.number_input("TX Roll (°)", value=0.0, step=1.0)
-    tx_pitch_bias = c2.number_input("TX Pitch (°)", value=0.0, step=1.0)
-    tx_yaw_bias = c3.number_input("TX Yaw (°)", value=0.0, step=1.0)
+    tx_roll_bias = c1.number_input("TX Roll (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
+    tx_pitch_bias = c2.number_input("TX Pitch (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
+    tx_yaw_bias = c3.number_input("TX Yaw (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
 
     st.markdown("**RX Array Mounting Errors**")
     c4, c5, c6 = st.columns(3)
-    rx_roll_bias = c4.number_input("RX Roll (°)", value=0.0, step=1.0)
-    rx_pitch_bias = c5.number_input("RX Pitch (°)", value=0.0, step=1.0)
-    rx_yaw_bias = c6.number_input("RX Yaw (°)", value=0.0, step=1.0)
+    rx_roll_bias = c4.number_input("RX Roll (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
+    rx_pitch_bias = c5.number_input("RX Pitch (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
+    rx_yaw_bias = c6.number_input("RX Yaw (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
 
 # Motion Stabilization
 with st.sidebar.expander("Motion Stabilization", expanded=False):
     auto_roll = st.checkbox("Roll Stabilization (RX)", value=True)
     auto_pitch = st.checkbox("Pitch Stabilization (TX)", value=True)
     auto_yaw = st.checkbox("Yaw Stabilization (TX)", value=True)
-    target_swath_width = st.number_input("Stabilized Swath Coverage (°)", min_value=10.0, max_value=150.0, value=120.0,
-                                         step=1.0, help="Sets the range of accepted soundings when motion stabilization is active (coverage in degrees is in reference to the system at 0° pitch, 0° roll, and 0° yaw).")
-    num_sectors = st.selectbox("Number of TX Sectors", options=[1, 2, 3, 4, 5, 8], index=0)
 
+
+st.sidebar.header("System Parameters")
+
+with st.sidebar.expander("Array Specifications", expanded=False):
+    c1, c2 = st.columns(2)
+    frequency = st.number_input("Frequency (Hz)", min_value=1000.0, max_value=1000000.0, value=300000.0, step=1000.0)
+    tx_beamwidth = c1.number_input("TX BW (Along-Track) (°)", value=0.5, step=0.1)
+    rx_beamwidth = c1.number_input("RX BW (Across-Track) (°)", value=1.0, step=0.1)
+    tx_across_fan_bw = c2.number_input("TX BW (Across-Track) (°)", value=160.0, step=1.0)
+    rx_fore_aft_bw = c2.number_input("RX BW (Along-Track) (°)", value=30.0, step=1.0)
+    target_swath_width = st.number_input("Stabilized Swath Coverage (°)",
+                                         min_value=10.0, max_value=float(tx_across_fan_bw),
+                                         value=min(120.0, float(tx_across_fan_bw)), step=1.0,
+                                         help="Sets the range of accepted soundings when motion stabilization is active (coverage in degrees is in reference to the system at 0° pitch, 0° roll, and 0° yaw).")
+    num_sectors = st.selectbox("Number of TX Sectors", options=[1, 2, 3, 4, 5, 8], index=0)
+    shading_type = st.selectbox("Array Shading", options=["Uniform", "Hann", "Hamming", "Dolph-Chebyshev"], index=0)
+    if shading_type == "Dolph-Chebyshev":
+        cheb_attenuation = st.number_input("Desired Sidelobe Suppression (dB)", min_value=1.0, max_value=60.0,
+                                           value=30.0, step=1.0)
+    else:
+        cheb_attenuation = 30.0
 with st.sidebar.expander("Acoustic Energy", expanded=False):
     source_level = st.number_input("Source Level [dB]", min_value=10.0, max_value=300.0, value=210.0, step=0.1)
-    noise_spectrum_level = st.number_input("Ambient Noise Spectrum Level [dB re 1µPa²/Hz]", value=40.0, step=1.0) # maybe move this to environment section
-    bs_nadir = st.number_input("Target Strength [dB]", min_value=-60.0, max_value=0.0, value=-20.0, step=1.0)
-    apply_tvg = st.checkbox("Apply TVG to Heatmap", value=True)
+    noise_spectrum_level = st.number_input("Ambient Noise Spectrum Level [dB re 1µPa²/Hz]", value=40.0, step=1.0)
+
 
 with st.sidebar.expander("Pulse Specifications", expanded=False):
     st.checkbox("Lock as Continuous Wave (CW)", key="cw_lock", on_change=sync_bw_from_tau,
@@ -215,8 +287,8 @@ with st.sidebar.expander("Pulse Specifications", expanded=False):
     # Case for valid CW mode
     elif not st.session_state.cw_lock:
         st.success(f"**Active Mode: Custom CW Pulse (TB = {time_bw_product:.2f})**")
-
-with st.sidebar.expander("Acoustic Lobes", expanded=False):
+st.sidebar.header("Visualization Toggles")
+with st.sidebar.expander("Visualize Acoustic Lobes", expanded=False):
 
     st.markdown("**Theoretical Beam Patterns (Relative dB)**")
     show_tx_solid = st.checkbox("TX Directivity Pattern (Blue)", value=True)
@@ -260,12 +332,18 @@ else:
     array_relative_rx_angle = queried_angle
 
 # Dynamic Sector Steering (Pitch & Yaw Stabilization)
-swath_edges = np.linspace(-75.0, 75.0, num_sectors + 1)
+# System can only steer/ensonify up to hardware limit
+effective_swath_width = min(target_swath_width, tx_across_fan_bw)
+half_swath = effective_swath_width / 2.0
+
+swath_edges = np.linspace(-half_swath, half_swath, num_sectors + 1)
 sector_limits = [(swath_edges[i], swath_edges[i + 1]) for i in range(num_sectors)]
 
 
 def get_sector_steering(sector_center_angle):
     """Calculates the unique pitch and yaw steering required for a specific sector"""
+    steer_deg = 0.0
+
     if auto_pitch:
         # Optimal pitch steering changes based on the across-track angle
         pitch_comp_rad = np.arcsin(np.sin(np.radians(-imu_pitch)) * np.cos(np.radians(sector_center_angle)))
@@ -337,7 +415,7 @@ dynamic_rx_bw_rad = rx_bw_rad / np.cos(theta_rad)
 def calculate_absorption_fg(frequency_hz, T, S, D, pH, c_sound_user):
     """
     Calculates the acoustic absorption coefficient (alpha) in dB/m
-    using the full Francois-Garrison (1982) model.
+    using Francois-Garrison (1982).
     """
     f = frequency_hz / 1000.0  # Convert Hz to kHz
     T_k = T + 273.15  # Convert Temperature to Kelvin
@@ -365,7 +443,7 @@ def calculate_absorption_fg(frequency_hz, T, S, D, pH, c_sound_user):
     P3 = 1.0 - (3.83e-5 * D) + (4.9e-10 * D ** 2)
     alpha_pure = A3 * P3 * f ** 2
 
-    # Total attenuation is the sum of all three components (dB/km)
+    # Total attenuation is sum of all three components (dB/km)
     alpha_db_km = alpha_boric + alpha_mgso4 + alpha_pure
 
     # Convert from dB/km to dB/m for local spatial calculations
@@ -373,6 +451,24 @@ def calculate_absorption_fg(frequency_hz, T, S, D, pH, c_sound_user):
 
 display_alpha_db_km = calculate_absorption_fg(frequency, water_temp, salinity, depth, ph_level, c_sound) * 1000.0
 alpha_placeholder.info(f"**Absorption Coefficient (α):** {display_alpha_db_km:.2f} dB/km")
+
+
+def get_sediment_ts(inc_angle_rad, area_sqm):
+    """Calculates Target Strength using OE874 Lab C Modified Lambertian model."""
+    # baseline scattering
+    lambert = bs_base + 10 * np.log10(np.cos(inc_angle_rad) ** 2 + 1e-12)
+
+    # Specular peak
+    if abs(inc_angle_rad) < crit_angle_rad:
+        specular = bs_spec * (1.0 + np.cos(np.pi * abs(inc_angle_rad) / crit_angle_rad)) / 2.0
+    else:
+        specular = 0.0
+
+    # Area scattering
+    area_scattering = 10 * np.log10(area_sqm + 1e-12)
+
+    # add values as done in OE874 Lab C
+    return lambert + specular + area_scattering
 
 # --- 3-Axis Rotation Matrix (Tait-Bryan Yaw-Pitch-Roll) ---
 def get_rotation_matrix(roll_deg, pitch_deg, yaw_deg):
@@ -539,12 +635,22 @@ def project_to_flat_bottom(v_ray):
 
 # Calculate exact 3D nodes
 pt_calculated = solve_mills_cross_intersection(R_tx_ideal, R_rx_ideal, tx_steer_rad, theta_rad, depth)
-pt_physical = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_steer_rad, theta_rad, depth)
+
+# Apply Snell's Law to the commanded angles to find the actual physical launch angles
+sin_theta_actual = np.sin(theta_rad) * (c_sound / assumed_sv)
+sin_tx_actual = np.sin(tx_steer_rad) * (c_sound / assumed_sv)
+
+if abs(sin_theta_actual) <= 1.0 and abs(sin_tx_actual) <= 1.0:
+    theta_actual_rad = np.arcsin(sin_theta_actual)
+    tx_steer_actual_rad = np.arcsin(sin_tx_actual)
+    pt_physical = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_steer_actual_rad, theta_actual_rad, depth)
+else:
+    # Fallback to prevent crashing if total internal reflection occurs
+    theta_actual_rad = theta_rad
+    tx_steer_actual_rad = tx_steer_rad
+    pt_physical = np.array([0.0, 0.0, 0.0])
 
 # TX Fan Geometry Construction (Dynamic Multi-Sector Layout)
-tx_fwd_psi = tx_steer_rad + (dynamic_tx_bw_rad / 2)
-tx_aft_psi = tx_steer_rad - (dynamic_tx_bw_rad / 2)
-
 physical_tx_sectors = []
 calculated_tx_sectors = []
 
@@ -552,69 +658,111 @@ for start_angle, end_angle in sector_limits:
     sector_center = (start_angle + end_angle) / 2.0
     sec_steer_rad = get_sector_steering(sector_center)
 
-    # Secant beamwidth expansion for this specific sector
-    sec_tx_bw_rad = tx_bw_rad / np.cos(sec_steer_rad)
-    sec_fwd_psi = sec_steer_rad + (sec_tx_bw_rad / 2)
-    sec_aft_psi = sec_steer_rad - (sec_tx_bw_rad / 2)
+    # --- Apply Visual Padding to encapsulate the edge beams ---
+    # I'm not sure if this is the best solution to an open problem I have. I don't know if the outermost beam angle should be shown
+    # to project out beyond the swath extent, since I am currently unclear on how the outermost sounding is derived (e.g. is it from the
+    # acoustic center or the outermost across-track extent of the beam footprint? Currently, the visual extends the tx sector limit to
+    # encapsulate the whole outermost beam footprint. NEEDS TO BE REVISITED!!!
 
-    # Physical Fan Sectors
-    phys_fwd = [project_to_flat_bottom(np.dot(R_tx_mech, make_tx_ray(t_s, sec_fwd_psi)).flatten()) for t_s in
-                np.linspace(np.radians(start_angle), np.radians(end_angle), 25)]
-    phys_aft = [project_to_flat_bottom(np.dot(R_tx_mech, make_tx_ray(t_s, sec_aft_psi)).flatten()) for t_s in
-                np.linspace(np.radians(start_angle), np.radians(end_angle), 25)]
-    physical_tx_sectors.append(phys_fwd + list(reversed(phys_aft)))
+    # Find the most extreme edge of this specific sector
+    max_edge = max(abs(start_angle), abs(end_angle))
 
-    # Ideal Fan Sectors
-    calc_fwd = [project_to_flat_bottom(np.dot(R_tx_ideal, make_tx_ray(t_s, sec_fwd_psi)).flatten()) for t_s in
-                np.linspace(np.radians(start_angle), np.radians(end_angle), 25)]
-    calc_aft = [project_to_flat_bottom(np.dot(R_tx_ideal, make_tx_ray(t_s, sec_aft_psi)).flatten()) for t_s in
-                np.linspace(np.radians(start_angle), np.radians(end_angle), 25)]
-    calculated_tx_sectors.append(calc_fwd + list(reversed(calc_aft)))
+    # Apply secant broadening to the padding
+    padding_deg = ((rx_beamwidth / 2.0) / max(0.1, np.cos(np.radians(max_edge))))
+
+    padded_start = start_angle - padding_deg
+    padded_end = end_angle + padding_deg
+
+    # Assumed TX Fan Sectors
+    sec_tx_bw_rad_ideal = tx_bw_rad / np.cos(sec_steer_rad)
+    sec_fwd_psi_ideal = sec_steer_rad + (sec_tx_bw_rad_ideal / 2.0)
+    sec_aft_psi_ideal = sec_steer_rad - (sec_tx_bw_rad_ideal / 2.0)
+
+    calc_fwd, calc_aft = [], []
+    for t_s_ideal in np.linspace(np.radians(padded_start), np.radians(padded_end), 25):
+        # Use Mills Cross math with an imaginary sweeping RX angle to trace the assumed TX edges
+        pt_fwd = solve_mills_cross_intersection(R_tx_ideal, R_rx_ideal, sec_fwd_psi_ideal, t_s_ideal, depth)
+        pt_aft = solve_mills_cross_intersection(R_tx_ideal, R_rx_ideal, sec_aft_psi_ideal, t_s_ideal, depth)
+
+        if np.linalg.norm(pt_fwd) > 0 and np.linalg.norm(pt_aft) > 0:
+            calc_fwd.append(pt_fwd)
+            calc_aft.append(pt_aft)
+
+    if calc_fwd and calc_aft:
+        calculated_tx_sectors.append(calc_fwd + list(reversed(calc_aft)))
+
+    # Actual TX Fan Sectors (with refraction for assumed ssv)
+    sin_sec_actual = np.sin(sec_steer_rad) * (c_sound / assumed_sv)
+    if abs(sin_sec_actual) <= 1.0:
+        sec_steer_actual = np.arcsin(sin_sec_actual)
+    else:
+        sec_steer_actual = sec_steer_rad
+
+    sec_tx_bw_rad_actual = tx_bw_rad / np.cos(sec_steer_actual)
+    sec_fwd_psi_actual = sec_steer_actual + (sec_tx_bw_rad_actual / 2.0)
+    sec_aft_psi_actual = sec_steer_actual - (sec_tx_bw_rad_actual / 2.0)
+
+    phys_fwd, phys_aft = [], []
+    for t_s_ideal in np.linspace(np.radians(padded_start), np.radians(padded_end), 25):
+        # Refract the sweep angle
+        sin_ts_actual = np.sin(t_s_ideal) * (c_sound / assumed_sv)
+        if abs(sin_ts_actual) <= 1.0:
+            t_s_actual = np.arcsin(sin_ts_actual)
+        else:
+            t_s_actual = t_s_ideal
+
+        # Use Mills Cross math with the refracted sweeping RX angle to trace the physical TX edges
+        pt_fwd = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, sec_fwd_psi_actual, t_s_actual, depth)
+        pt_aft = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, sec_aft_psi_actual, t_s_actual, depth)
+
+        if np.linalg.norm(pt_fwd) > 0 and np.linalg.norm(pt_aft) > 0:
+            phys_fwd.append(pt_fwd)
+            phys_aft.append(pt_aft)
+
+    if phys_fwd and phys_aft:
+        physical_tx_sectors.append(phys_fwd + list(reversed(phys_aft)))
 
 # RX Footprint Geometry Construction
-required_acceptance_deg = abs(tx_steer_angle) + (tx_beamwidth / 2.0) + 2.0
 rx_acceptance_rad = np.radians(rx_fore_aft_bw / 2.0)
 
-half_rx_bw = dynamic_rx_bw_rad / 2
-theta_min = theta_rad - half_rx_bw
-theta_max = theta_rad + half_rx_bw
+# Use actual refracted angle for the physical RX footprint
+half_rx_bw_actual = (rx_bw_rad / np.cos(theta_actual_rad)) / 2.0
+theta_min_actual = theta_actual_rad - half_rx_bw_actual
+theta_max_actual = theta_actual_rad + half_rx_bw_actual
 
 rx_red_perimeter = []
-rx_red_perimeter.extend(
-    [project_to_flat_bottom(np.dot(R_rx_mech, make_rx_ray(t_s, rx_acceptance_rad)).flatten()) for t_s in
-     np.linspace(theta_min, theta_max, 15)])
-rx_red_perimeter.extend([project_to_flat_bottom(np.dot(R_rx_mech, make_rx_ray(theta_max, phi)).flatten()) for phi in
-                         np.linspace(rx_acceptance_rad, -rx_acceptance_rad, 15)])
-rx_red_perimeter.extend(
-    [project_to_flat_bottom(np.dot(R_rx_mech, make_rx_ray(t_s, -rx_acceptance_rad)).flatten()) for t_s in
-     np.linspace(theta_max, theta_min, 15)])
-rx_red_perimeter.extend([project_to_flat_bottom(np.dot(R_rx_mech, make_rx_ray(theta_min, phi)).flatten()) for phi in
-                         np.linspace(-rx_acceptance_rad, rx_acceptance_rad, 15)])
 
-rx_full_perimeter = []
-rx_full_perimeter.extend(
-    [project_to_flat_bottom(np.dot(R_rx_mech, make_rx_ray(t_s, rx_acceptance_rad)).flatten()) for t_s in
-     np.linspace(-np.radians(77), np.radians(77), 50)])
-rx_full_perimeter.extend(
-    [project_to_flat_bottom(np.dot(R_rx_mech, make_rx_ray(np.radians(77), phi)).flatten()) for phi in
-     np.linspace(rx_acceptance_rad, -rx_acceptance_rad, 15)])
-rx_full_perimeter.extend(
-    [project_to_flat_bottom(np.dot(R_rx_mech, make_rx_ray(t_s, -rx_acceptance_rad)).flatten()) for t_s in
-     np.linspace(np.radians(77), -np.radians(77), 50)])
-rx_full_perimeter.extend(
-    [project_to_flat_bottom(np.dot(R_rx_mech, make_rx_ray(-np.radians(77), phi)).flatten()) for phi in
-     np.linspace(-rx_acceptance_rad, rx_acceptance_rad, 15)])
+# Trace the 4 boundaries of the RX strip using Mills Cross math by sweeping an imaginary TX ping across it
+# Forward along-track sweep along the "max" across-track edge
+for t_tx in np.linspace(-rx_acceptance_rad, rx_acceptance_rad, 20):
+    pt = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, t_tx, theta_max_actual, depth)
+    if np.linalg.norm(pt) > 0: rx_red_perimeter.append(pt)
 
-rx_full_x = [p[0] for p in rx_full_perimeter]
-rx_full_y = [p[1] for p in rx_full_perimeter]
-rx_full_z = [p[2] for p in rx_full_perimeter]
+# Across-track sweep at the forward boundary
+for t_rx in np.linspace(theta_max_actual, theta_min_actual, 10):
+    pt = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, rx_acceptance_rad, t_rx, depth)
+    if np.linalg.norm(pt) > 0: rx_red_perimeter.append(pt)
+
+# Backward along-track sweep along the "min" across-track edge
+for t_tx in np.linspace(rx_acceptance_rad, -rx_acceptance_rad, 20):
+    pt = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, t_tx, theta_min_actual, depth)
+    if np.linalg.norm(pt) > 0: rx_red_perimeter.append(pt)
+
+# Across-track sweep at the aft boundary
+for t_rx in np.linspace(theta_min_actual, theta_max_actual, 10):
+    pt = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, -rx_acceptance_rad, t_rx, depth)
+    if np.linalg.norm(pt) > 0: rx_red_perimeter.append(pt)
 
 # --- Calculate Sounding Patch ---
-tx_edge_fwd = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_fwd_psi, theta_rad, depth)
-tx_edge_aft = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_aft_psi, theta_rad, depth)
+# Use "actual" refracted angles for the physical intersection patch
+tx_fwd_psi_actual = tx_steer_actual_rad + ((tx_bw_rad / np.cos(tx_steer_actual_rad)) / 2.0)
+tx_aft_psi_actual = tx_steer_actual_rad - ((tx_bw_rad / np.cos(tx_steer_actual_rad)) / 2.0)
 
-rx_edge_max = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_steer_rad, theta_max, depth)
-rx_edge_min = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_steer_rad, theta_min, depth)
+tx_edge_fwd = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_fwd_psi_actual, theta_actual_rad, depth)
+tx_edge_aft = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_aft_psi_actual, theta_actual_rad, depth)
+
+rx_edge_max = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_steer_actual_rad, theta_max_actual, depth)
+rx_edge_min = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_steer_actual_rad, theta_min_actual, depth)
 
 has_overlap = all(np.linalg.norm(p) > 1e-3 for p in [tx_edge_fwd, tx_edge_aft, rx_edge_max, rx_edge_min])
 
@@ -637,7 +785,6 @@ if has_overlap:
     patch_area = np.pi * a * b
 
     # --- Pulse Resolution & Tapering Logic ---
-
     # Equivalent Rectangular Duration Ratios for Spatial Resolution (Energy)
     erd_ratios = {"Rectangular": 1.0, "Tukey": 0.938, "Hamming": 0.397, "Hann": 0.375}
     effective_pulse_duration_s = (pulse_width_ms / 1000.0) * erd_ratios.get(pulse_tapering, 1.0)
@@ -722,11 +869,24 @@ else:
     pulse_slice_meshes = []
 
 # --- METRICS & VALUES ---
-delta_x = pt_physical[0] - pt_calculated[0]
-delta_y = pt_physical[1] - pt_calculated[1]
+# Calculate where the acquisition software interprets the queried beam to be
+if np.linalg.norm(pt_physical) > 0 and np.linalg.norm(pt_calculated) > 0:
+    # True physical distance the ping traveled
+    R_true_q = np.linalg.norm(pt_physical)
 
-tx_edge_fwd = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_fwd_psi, theta_rad, depth)
-tx_edge_aft = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, tx_aft_psi, theta_rad, depth)
+    # Software calculates range using true TWTT but assumed sound speed
+    R_perceived_q = R_true_q * (assumed_sv / c_sound)
+
+    # Software plots along the ideal commanded vector
+    u_id_q = pt_calculated / np.linalg.norm(pt_calculated)
+    pt_perceived = u_id_q * R_perceived_q
+else:
+    pt_perceived = pt_calculated
+
+# Deltas comparing Software Derived vs "Ideal"
+delta_x = pt_perceived[0] - pt_calculated[0]
+delta_y = pt_perceived[1] - pt_calculated[1]
+delta_z = pt_perceived[2] - pt_calculated[2]
 
 if np.linalg.norm(tx_edge_fwd) > 0 and np.linalg.norm(tx_edge_aft) > 0:
     tx_x_width = np.linalg.norm(tx_edge_fwd - tx_edge_aft)
@@ -751,19 +911,6 @@ if np.linalg.norm(pt_physical) > 0:
 else:
     rx_status = "Invalid"
     tx_status = "Invalid"
-
-st.subheader(f"Intersection Metrics for Queried Beam ({queried_angle}°)")
-
-col1, col2, col3, col4, col5, col6 = st.columns(6)
-col1.metric("Along Dev (X)", f"{delta_x:.2f} m")
-col2.metric("Across Dev (Y)", f"{delta_y:.2f} m")
-col3.metric("Inside TX Fan?", tx_status)
-col4.metric("Inside RX Listening Area?", rx_status)
-col5.metric("Along Track Patch Width", f"{tx_x_width:.2f} m")
-if is_pulse_limited:
-    col6.metric("Active Area (Pulse-Limited)", f"{active_patch_area:.2f} m²")
-else:
-    col6.metric("Active Area (Beam-Limited)", f"{active_patch_area:.2f} m²")
 
 
 # --- Calculate Transmission Loss and Intensity for Queried Beam---
@@ -795,9 +942,7 @@ if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
     absorption_loss = 2 * alpha_db_m * slant_range_m
     two_way_tl = spreading_loss + absorption_loss
 
-    lambert_angular_decay = 10 * np.log10(np.cos(np.radians(queried_angle)) ** 2 + 1e-12)
-    area_scattering = 10 * np.log10(active_patch_area + 1e-12)
-    dynamic_ts = bs_nadir + lambert_angular_decay + area_scattering
+    dynamic_ts = get_sediment_ts(np.radians(queried_angle), active_patch_area)
 
     relative_intensity = dynamic_ts - two_way_tl
     absolute_pressure = source_level + relative_intensity + processing_gain
@@ -809,139 +954,148 @@ if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
         status_text = ":red[Not Detected]"
         tvg_display = "N/A (No Signal)"
 
-acol1, acol2, acol3, acol4, acol5, acol6 = st.columns(6)
-acol1.metric("Detection Status (Range Only)", status_text)
-acol2.metric("TVG Corrected Return Intensity", tvg_display)
-acol3.metric("Raw Return (Absolute Pressure)", f"{absolute_pressure:.1f} dB")
+# --- UI Tabs for Metrics and Theoretical Array Specs ---
+tab1, tab2 = st.tabs(["Query Metrics", "Theoretical Array Specifications (Nominal 1500 m/s)"])
+
+with tab1:
+    col1, col2, col3, col4, col5= st.columns(5)
+    col1.metric("Alongtrack Deviation (X)", f"{delta_x:.2f} m")
+    col2.metric("Acrosstrack Deviation (Y)", f"{delta_y:.2f} m")
+    col3.metric("Vertical Deviation (Z)", f"{delta_z:.2f} m")
+    col4.metric("Inside TX Fan?", tx_status)
+    col5.metric("Inside RX Listening Area?", rx_status)
 
 
-st.markdown("---")
-st.subheader("**Theoretical Array Specifications (Nominal 1500 m/s)**")
+    acol1, acol2, acol3, acol4, acol5 = st.columns(5)
+    acol1.metric("Detection Status (Range Only)", status_text)
+    acol2.metric("TVG Corrected Return Intensity", tvg_display)
+    acol3.metric("Raw Return (Absolute Pressure)", f"{absolute_pressure:.1f} dB")
+    acol4.metric("Along Track Patch Width", f"{tx_x_width:.2f} m")
+    if is_pulse_limited:
+        acol5.metric("Active Area (Pulse-Limited)", f"{active_patch_area:.2f} m²")
+    else:
+        acol5.metric("Active Area (Beam-Limited)", f"{active_patch_area:.2f} m²")
 
-# Calculate UI variables matching the math engine
-lambda_nom_ui = 1500.0 / frequency
-if shading_type == "Uniform":
-    bw_factor_ui = 0.886
-elif shading_type == "Hann":
-    bw_factor_ui = 1.44
-elif shading_type == "Hamming":
-    bw_factor_ui = 1.36
-elif shading_type == "Dolph-Chebyshev":
-    bw_factor_ui = 0.886 * (1.0 + ((cheb_attenuation - 20.0) * 0.016667))
+with tab2:
+    # Calculate UI variables matching the math engine
+    lambda_nom_ui = 1500.0 / frequency
+    if shading_type == "Uniform":
+        bw_factor_ui = 0.886
+    elif shading_type == "Hann":
+        bw_factor_ui = 1.44
+    elif shading_type == "Hamming":
+        bw_factor_ui = 1.36
+    elif shading_type == "Dolph-Chebyshev":
+        bw_factor_ui = 0.886 * (1.0 + ((cheb_attenuation - 20.0) * 0.016667))
 
-L_tx_ui = bw_factor_ui * lambda_nom_ui / np.radians(tx_beamwidth)
-L_rx_ui = bw_factor_ui * lambda_nom_ui / np.radians(rx_beamwidth)
+    L_tx_ui = bw_factor_ui * lambda_nom_ui / np.radians(tx_beamwidth)
+    L_rx_ui = bw_factor_ui * lambda_nom_ui / np.radians(rx_beamwidth)
 
-N_tx_ui = int(np.ceil(L_tx_ui / (lambda_nom_ui / 2.0)))
-N_rx_ui = int(np.ceil(L_rx_ui / (lambda_nom_ui / 2.0)))
+    N_tx_ui = int(np.ceil(L_tx_ui / (lambda_nom_ui / 2.0)))
+    N_rx_ui = int(np.ceil(L_rx_ui / (lambda_nom_ui / 2.0)))
 
-# Calculate Effective Beamwidth for UI
-wav_env_ui = c_sound / frequency
-eff_tx_deg = np.degrees(bw_factor_ui * wav_env_ui / L_tx_ui)
-eff_rx_deg = np.degrees(bw_factor_ui * wav_env_ui / L_rx_ui)
+    # Calculate Effective Beamwidth for UI
+    wav_env_ui = c_sound / frequency
+    eff_tx_deg = np.degrees(bw_factor_ui * wav_env_ui / L_tx_ui)
+    eff_rx_deg = np.degrees(bw_factor_ui * wav_env_ui / L_rx_ui)
 
-# Calculate deltas and hide them if the rounded difference is 0.00
-tx_diff = eff_tx_deg - tx_beamwidth
-tx_delta = f"{tx_diff:.2f}°" if abs(tx_diff) >= 0.005 else None
+    # Calculate deltas and hide them if the rounded difference is 0.00
+    tx_diff = eff_tx_deg - tx_beamwidth
+    tx_delta = f"{tx_diff:.2f}°" if abs(tx_diff) >= 0.005 else None
 
-rx_diff = eff_rx_deg - rx_beamwidth
-rx_delta = f"{rx_diff:.2f}°" if abs(rx_diff) >= 0.005 else None
+    rx_diff = eff_rx_deg - rx_beamwidth
+    rx_delta = f"{rx_diff:.2f}°" if abs(rx_diff) >= 0.005 else None
 
-# 6 column layout for array specs metrics
-hw1, hw2, hw3, hw4, hw5, hw6 = st.columns(6)
-hw1.metric("TX Length", f"{L_tx_ui:.2f} m")
-hw2.metric("RX Length", f"{L_rx_ui:.2f} m")
-hw3.metric("TX Elements", f"{N_tx_ui}")
-hw4.metric("RX Elements", f"{N_rx_ui}")
-hw5.metric("Effective TX BW", f"{eff_tx_deg:.2f}°", delta=tx_delta, delta_color="inverse")
-hw6.metric("Effective RX BW", f"{eff_rx_deg:.2f}°", delta=rx_delta, delta_color="inverse")
+    hw1, hw2, hw3, hw4, hw5, hw6 = st.columns(6)
+    hw1.metric("TX Length", f"{L_tx_ui:.2f} m")
+    hw2.metric("TX Elements", f"{N_tx_ui}")
+    hw3.metric("Effective TX BW", f"{eff_tx_deg:.2f}°", delta=tx_delta, delta_color="inverse")
+    hw4.metric("RX Length", f"{L_rx_ui:.2f} m")
+    hw5.metric("RX Elements", f"{N_rx_ui}")
+    hw6.metric("Effective RX BW", f"{eff_rx_deg:.2f}°", delta=rx_delta, delta_color="inverse")
 
 # --- GRAPH TOGGLES ---
-st.markdown("---")
-st.subheader("Visualization Overlays")
+with st.sidebar.expander("Visualize Intersection Elements", expanded=False):
+    show_ideal_tx = st.checkbox("Assumed TX Sectors", value=False)
+    show_actual_tx = st.checkbox("Actual TX Sectors", value=True)
+    show_rx_red = st.checkbox("RX Footprint", value=True)
+    show_rx_listening_env = st.checkbox("RX Listening Envelope", value=True)
+    show_heatmap = st.checkbox("Beam Pattern Heatmap", value=True)
 
-# condense toggles to left side of screen
-t_col1, t_col2, t_col3, t_col4, t_col5, t_col6, t_col7, spacer = st.columns([1.7, 1.8, 2.2, 1.5, 1.9, 2.0, 1.8, 10.0])
-
-show_ideal_tx = t_col1.checkbox("Ideal TX Sectors", value=False)
-show_actual_tx = t_col2.checkbox("Actual TX Sectors", value=True)
-show_rx_listening_env = t_col3.checkbox("RX Listening Envelope", value=True)
-show_rx_red = t_col4.checkbox("RX Footprint", value=True)
-show_ideal_soundings = t_col5.checkbox("Ideal Soundings (100 beams)", value=False)
-show_actual_soundings = t_col6.checkbox("Actual Soundings (100 beams)", value=False)
-show_heatmap = t_col7.checkbox("Show Seafloor Heatmap (dB)", value=True)
-
+with st.sidebar.expander("Visualize Soundings", expanded=False):
+    show_ideal_soundings = st.checkbox("Assumed Soundings (100 beams)", value=False)
+    show_software_soundings = st.checkbox("Software Calculated Soundings (100 beams)", value=True)
 
 # --- Equidistant beam math (100 beams for simplicity) ---
 # I believe this implementation is now fixed! However, not sure if this is best controlled by user from "target swath coverage" - might be counterintuitive,
 # and/or my method could just be wrong.
 ideal_sounding_dots = []
-actual_sounding_dots = []
+software_sounding_dots = []
 
-if show_ideal_soundings or show_actual_soundings:
-    per_side_target = target_swath_width / 2.0
-    max_y = depth * np.tan(np.radians(per_side_target))
+if show_ideal_soundings or show_software_soundings:
+    # Use the hardware-capped half_swath
+    max_y = depth * np.tan(np.radians(half_swath))
 
     # Create 100 target coordinates
     beam_y_coords = np.linspace(-max_y, max_y, 100)
 
     for y_coord in beam_y_coords:
+        for s_start, s_end in sector_limits:
+            sector_center = (s_start + s_end) / 2.0
+            steer_rad = get_sector_steering(sector_center)
 
-        if show_ideal_soundings:
-            for s_start, s_end in sector_limits:
-                sector_center = (s_start + s_end) / 2.0
-                steer_rad = get_sector_steering(sector_center)
+            # Global target assuming this specific sector's pitch steer
+            v_target_global = np.array([depth * np.tan(steer_rad), y_coord, depth])
 
-                # Global target assuming this specific sector's pitch steer
-                v_target_global = np.array([depth * np.tan(steer_rad), y_coord, depth])
+            if auto_roll:
+                v_target_local = np.dot(R_rx_ideal.T, v_target_global)
+            else:
+                v_target_local = v_target_global
 
-                if auto_roll:
-                    v_target_local = np.dot(R_rx_ideal.T, v_target_global)
-                else:
-                    v_target_local = v_target_global
+            # The commanded RX steering angle
+            b_rad = np.arcsin(np.clip(v_target_local[1] / np.linalg.norm(v_target_local), -1.0, 1.0))
+            commanded_angle_deg = np.degrees(b_rad)
 
-                b_rad = np.arcsin(np.clip(v_target_local[1] / np.linalg.norm(v_target_local), -1.0, 1.0))
+            # Absolute hardware steering limit
+            if abs(commanded_angle_deg) > 75.0:
+                continue
 
-                if abs(np.degrees(b_rad)) > 75.0:
-                    continue
+            # Does this commanded beam belong to this specific sector?
+            if not (s_start <= commanded_angle_deg <= s_end):
+                continue
 
-                pt_id = solve_mills_cross_intersection(R_tx_ideal, R_rx_ideal, steer_rad, b_rad, depth)
-                if np.linalg.norm(pt_id) > 0:
-                    v_local_id = np.dot(R_tx_ideal.T, pt_id / np.linalg.norm(pt_id))
-                    across_angle_id = np.degrees(np.arcsin(np.clip(v_local_id[1], -1.0, 1.0)))
+            # --- Calculate Assumed Soundings (Blue) ---
+            pt_id = solve_mills_cross_intersection(R_tx_ideal, R_rx_ideal, steer_rad, b_rad, depth)
 
-                    # Check if landed in sector boundary
-                    if s_start <= across_angle_id <= s_end:
-                        ideal_sounding_dots.append(pt_id)
-                        break  # Match found, move to next Y coordinate
+            if show_ideal_soundings and np.linalg.norm(pt_id) > 0:
+                ideal_sounding_dots.append(pt_id)
 
-        if show_actual_soundings:
-            for s_start, s_end in sector_limits:
-                sector_center = (s_start + s_end) / 2.0
-                steer_rad = get_sector_steering(sector_center)
+            # --- Calculate Software Calculated Soundings (Orange) ---
+            if show_software_soundings and np.linalg.norm(pt_id) > 0:
+                # Snell's Law at the array face: actual steer angle due to SV mismatch
+                sin_b_actual = np.sin(b_rad) * (c_sound / assumed_sv)
+                sin_steer_actual = np.sin(steer_rad) * (c_sound / assumed_sv)
 
-                # Global target assuming this specific sector's pitch steer
-                v_target_global = np.array([depth * np.tan(steer_rad), y_coord, depth])
+                if abs(sin_b_actual) <= 1.0 and abs(sin_steer_actual) <= 1.0:
+                    b_rad_actual = np.arcsin(sin_b_actual)
+                    steer_rad_actual = np.arcsin(sin_steer_actual)
 
-                if auto_roll:
-                    v_target_local = np.dot(R_rx_ideal.T, v_target_global)
-                else:
-                    v_target_local = v_target_global
+                    # True physical intersection on the seafloor
+                    pt_ac = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, steer_rad_actual, b_rad_actual, depth)
 
-                b_rad = np.arcsin(np.clip(v_target_local[1] / np.linalg.norm(v_target_local), -1.0, 1.0))
+                    if np.linalg.norm(pt_ac) > 0:
+                        # Scales true TWTT by assumed ssv and plots along the commanded vector
+                        R_true = np.linalg.norm(pt_ac)
+                        R_perceived_loop = R_true * (assumed_sv / c_sound)
 
-                if abs(np.degrees(b_rad)) > 75.0:
-                    continue
+                        u_id = pt_id / np.linalg.norm(pt_id)
+                        loop_pt_perceived = u_id * R_perceived_loop
 
-                pt_ac = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, steer_rad, b_rad, depth)
-                if np.linalg.norm(pt_ac) > 0:
-                    v_local_ac = np.dot(R_tx_mech.T, pt_ac / np.linalg.norm(pt_ac))
-                    across_angle_ac = np.degrees(np.arcsin(np.clip(v_local_ac[1], -1.0, 1.0)))
+                        software_sounding_dots.append(loop_pt_perceived)
 
-                    # check if landed in sector boundary
-                    if s_start <= across_angle_ac <= s_end:
-                        actual_sounding_dots.append(pt_ac)
-                        break  # Match found, move to next Y coordinate
+            # Beam processed for this y-coordinate, move to the next one
+            break
+
 
 # --- 3D Visualization ---
 fig = go.Figure()
@@ -953,7 +1107,7 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
     nominal_range_x = depth * np.tan(np.radians(tx_beamwidth * span_factor))
     nominal_range_y = depth * np.tan(np.radians(rx_beamwidth * span_factor)) / (np.cos(theta_rad) ** 2)
 
-    # Identify larger small axis beamwidth and set for square map rendering
+    # Identify larger small axis beamwidth and set for suare map rendering
     grid_range = max(10.0, nominal_range_x, nominal_range_y)
 
     grid_range_x = grid_range
@@ -971,14 +1125,15 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
 
     # Dynamically anchor the color scale to the nadir values so it never blanks out
     nadir_tl = 40 * np.log10(depth) + 2 * alpha_db_m * depth
+    nadir_max_ts = bs_base + bs_spec + 10 * np.log10(patch_area + 1e-12)  # Uses base + specular peak
 
     if apply_tvg:
-        cmax_val = bs_nadir
-        cmin_val = bs_nadir - 50.0
+        cmax_val = nadir_max_ts
+        cmin_val = bs_base - 50.0
         cbar_title = "TVG Corrected Intensity (dB)"
     else:
         # Raw Intensity strips away SL, leaving just the environmental penalties
-        cmax_val = bs_nadir - nadir_tl
+        cmax_val = nadir_max_ts - nadir_tl
         cmin_val = cmax_val - 60.0
         cbar_title = "Raw Intensity (dB)"
 
@@ -992,9 +1147,9 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
 
             v_geo = P / R
 
-            # Array Directivity
-            D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, is_tx=True)
-            D_rx = calculate_directivity(v_geo, R_rx_mech, theta_rad, is_tx=False)
+            # Array Directivity (Using physically refracted actual angles)
+            D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_actual_rad, is_tx=True)
+            D_rx = calculate_directivity(v_geo, R_rx_mech, theta_actual_rad, is_tx=False)
             I_linear = np.abs(D_tx * D_rx)
             DI_dB = 20 * np.log10(I_linear + 1e-12)
 
@@ -1003,10 +1158,8 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
 
             # Lambertian Target Strength
             cos_theta = abs(Z_grid[i, j]) / R
-            lambert_decay = 10 * np.log10(cos_theta ** 2 + 1e-12)
-
-            heatmap_area_scattering = 10 * np.log10(patch_area + 1e-12)
-            pixel_ts = bs_nadir + lambert_decay + heatmap_area_scattering
+            inc_angle = np.arccos(np.clip(cos_theta, 0.0, 1.0))
+            pixel_ts = get_sediment_ts(inc_angle, patch_area)
 
             # Calculate absolute physical pressure for this specific pixel
             pixel_absolute_pressure = source_level - two_way_tl + pixel_ts + DI_dB + processing_gain
@@ -1060,9 +1213,6 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
         interp_r_max = np.zeros_like(interp_angles_rad)
 
         for idx, ang_rad in enumerate(interp_angles_rad):
-            # Recalculate Target Strength for this specific angle
-            lamb_decay = 10 * np.log10(np.cos(ang_rad) ** 2 + 1e-12)
-
             # Approximate Ensonified Area transition (Beam vs Pulse limited)
             projected_pw = range_res_m / max(1e-6, np.sin(ang_rad))
             b_half = (depth * np.tan(dynamic_rx_bw_rad / 2)) / np.cos(ang_rad) ** 2
@@ -1074,8 +1224,8 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
             else:
                 area = np.pi * a_half * b_half
 
-            area_scat = 10 * np.log10(area + 1e-12)
-            ts_angle = bs_nadir + lamb_decay + area_scat
+            # Apply the specific sediment target strength
+            ts_angle = get_sediment_ts(ang_rad, area)
 
             angle_max_tl = source_level + ts_angle + processing_gain - total_noise_level
 
@@ -1095,7 +1245,6 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
 
     def generate_native_lobe(is_tx, color_scale, name, mode="Ghost"):
         """Generates a mathematically pure 3D polar directivity pattern."""
-
         # Dynamically center the grid on the steered beam
         if is_tx:
             v_center = np.pi / 2 - tx_steer_rad
@@ -1122,9 +1271,9 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
             for j in range(X_unit.shape[1]):
                 v_geo = np.array([X_unit[i, j], Y_unit[i, j], Z_unit[i, j]])
                 if is_tx:
-                    D = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, is_tx=True)
+                    D = calculate_directivity(v_geo, R_tx_mech, tx_steer_actual_rad, is_tx=True)
                 else:
-                    D = calculate_directivity(v_geo, R_rx_mech, theta_rad, is_tx=False)
+                    D = calculate_directivity(v_geo, R_rx_mech, theta_actual_rad, is_tx=False)
                 R_linear[i, j] = np.abs(D)
 
         # Normalize and map to dB scale (-40dB Floor) for color and Solid mode
@@ -1194,8 +1343,8 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
         for i in range(X_comb.shape[0]):
             for j in range(X_comb.shape[1]):
                 v_geo = np.array([X_comb[i, j], Y_comb[i, j], Z_comb[i, j]])
-                D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_rad, is_tx=True)
-                D_rx = calculate_directivity(v_geo, R_rx_mech, theta_rad, is_tx=False)
+                D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_actual_rad, is_tx=True)
+                D_rx = calculate_directivity(v_geo, R_rx_mech, theta_actual_rad, is_tx=False)
                 R_comb_linear[i, j] = np.abs(D_tx * D_rx)
 
         # Normalize to full dB scale
@@ -1255,7 +1404,7 @@ if show_ideal_tx:
             y=[p[1] for p in sector_pts] + [sector_pts[0][1]],
             z=[p[2] for p in sector_pts] + [sector_pts[0][2]],
             mode='lines', line=dict(color=color, width=3, dash='dash'),
-            name='Ideal TX Sectors' if idx == 0 else None,
+            name='Assumed TX Sectors' if idx == 0 else None,
             showlegend=(idx == 0)
         ))
 
@@ -1345,7 +1494,7 @@ fig.add_trace(go.Scatter3d(
     z=[tx_global_start[2], tx_global_end[2]],
     mode='lines',
     line=dict(color='blue', width=10),
-    name='Physical TX Array'
+    name='Physical TX Array', showlegend=False
 ))
 
 # Physical RX Array (Aligned along Y-axis locally, rotated by R_rx_mech)
@@ -1360,7 +1509,7 @@ fig.add_trace(go.Scatter3d(
     z=[rx_global_start[2], rx_global_end[2]],
     mode='lines',
     line=dict(color='red', width=10),
-    name='Physical RX Array'
+    name='Physical RX Array', showlegend=False
 ))
 
 # Vessel Bow Arrow (Follows where bow would point under motion)
@@ -1375,7 +1524,7 @@ fig.add_trace(go.Scatter3d(
     z=[0, fwd_global[2]],
     mode='lines',
     line=dict(color='black', width=5),
-    name='Vessel Forward Direction'
+    name='Vessel Forward Direction', showlegend=False
 ))
 
 # 3D Arrowhead Cone
@@ -1387,13 +1536,18 @@ fig.add_trace(go.Cone(
     colorscale=[[0, 'black'], [1, 'black']],
     showscale=False,
     name='Forward Arrowhead',
-    hoverinfo='skip'
+    hoverinfo='skip', showlegend=False
 ))
 
 fig.add_trace(go.Scatter3d(x=[0, pt_calculated[0]], y=[0, pt_calculated[1]], z=[0, pt_calculated[2]], mode='lines',
-                           line=dict(color='blue', width=4), name='Ideal Pointing Vector'))
+                           line=dict(color='blue', width=4), name='Assumed Pointing Vector'))
 fig.add_trace(go.Scatter3d(x=[0, pt_physical[0]], y=[0, pt_physical[1]], z=[0, pt_physical[2]], mode='lines',
                            line=dict(color='red', width=6), name='Actual Pointing Vector'))
+
+# Add the Software Calculated Vector (Dashed Orange)
+if np.linalg.norm(pt_perceived) > 0:
+    fig.add_trace(go.Scatter3d(x=[0, pt_perceived[0]], y=[0, pt_perceived[1]], z=[0, pt_perceived[2]], mode='lines',
+                               line=dict(color='darkorange', width=4, dash='dash'), name='Software Calculated Vector'))
 
 # --- Dynamic Pulse Band Surface (Resolution Cells) ---
 if has_overlap and len(pulse_slice_meshes) > 0:
@@ -1461,23 +1615,22 @@ if show_ideal_soundings and len(ideal_sounding_dots) > 0:
         y=[p[1] for p in ideal_sounding_dots],
         z=[p[2] for p in ideal_sounding_dots],
         mode='markers',
-        marker=dict(color='darkblue', size=3.5, symbol='circle'),
-        name='Ideal Soundings',
+        marker=dict(color='blue', size=3.5, symbol='circle'),
+        name='Assumed Soundings',
         showlegend=True
     ))
 
-# Add 100 Actual Sounding Points (orange dots matching actual sectors)
-if show_actual_soundings and len(actual_sounding_dots) > 0:
+# Add software derived soundings (Logged Data - Orange)
+if show_software_soundings and len(software_sounding_dots) > 0:
     fig.add_trace(go.Scatter3d(
-        x=[p[0] for p in actual_sounding_dots],
-        y=[p[1] for p in actual_sounding_dots],
-        z=[p[2] for p in actual_sounding_dots],
+        x=[p[0] for p in software_sounding_dots],
+        y=[p[1] for p in software_sounding_dots],
+        z=[p[2] for p in software_sounding_dots],
         mode='markers',
         marker=dict(color='darkorange', size=3.5, symbol='circle'),
-        name='Actual Soundings',
+        name='Software Calculated Soundings',
         showlegend=True
     ))
-
 
 # Figure layout
 fig.update_layout(
@@ -1488,23 +1641,28 @@ fig.update_layout(
         yaxis_title='Across-Track Y (m)',
         zaxis_title='Depth Z (m)',
         xaxis=dict(range=[-depth * 2.0, depth * 2.0]),
-
-        # Invert plotly axis to match normal conventions
         yaxis=dict(range=[depth * 5.0, -depth * 5.0]),
-
-        zaxis=dict(range=[depth * 1.1, -10]),
+        zaxis=dict(range=[depth * 1.5, -10]),
         aspectmode='manual',
         aspectratio=dict(x=1, y=2.5, z=0.5),
 
-        # Initial camera perspective
         camera=dict(
-            eye=dict(x=-1.5, y=0.0, z=1.0),
+            eye=dict(x=-1.0, y=0.0, z=0.4),
             center=dict(x=0.0, y=0.0, z=0.0),
             up=dict(x=0.0, y=0.0, z=-1.0)
         )
     ),
-    margin=dict(l=0, r=0, b=0, t=0),
-    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+    margin=dict(l=0, r=0, b=10, t=0),
+    legend=dict(
+        orientation="v",
+        yanchor="bottom",
+        y=0.02,
+        xanchor="left",
+        x=0.02,
+        bgcolor="rgba(255, 255, 255, 0.75)",
+        bordercolor="lightgray",
+        borderwidth=1
+    )
 )
 
 st.plotly_chart(fig, use_container_width=True)
