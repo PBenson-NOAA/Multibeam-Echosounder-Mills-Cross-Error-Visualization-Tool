@@ -6,12 +6,13 @@ from scipy.signal.windows import chebwin
 
 # Current next steps are:
 # 1. Refining descriptive language to nearly every function.
-# 2. Refining consistent terminology throughout for better clarity.
-# 3. Split up metrics to be better organized by what controls them and what they measure. Probably grouping and "help" descriptions.
-# 4. Reorganize sidebar to group swath coverage somewhere better - Done. Made significant sidebar grouping improvements
-# 5. Rename assumed SSV to something better. It also probably doesn't need its own sidebar section. - Not renaming for now. Also keeping in current section for time being.
-# 6. Read through code and adjust or elaborate on comments as needed.
+# 2. Refining consistent terminology throughout for better clarity. - IN PROGRESS
+# 3. Split up metrics to be better organized by what controls them and what they measure. Probably grouping and "help" descriptions. - IN PROGRESS
+# 4. Rename assumed SSV to something better. It also probably doesn't need its own sidebar section. - Not renaming for now. Also keeping in current section for time being.
+# 5. Read through code and adjust or elaborate on comments as needed.
+# 6. Take a thorough pass at the phase detection implementation and the associated lobe rendering/heatmap changes. Compare against lectures and literature for accuracy. - I think this has been implemented more robustly now with QF logic
 
+# NOTE: Slope implementation is not complete. Surface normal function assumes entire seafloor has same slope, so would need much more refinement to accommodate complex seafloor.
 
 st.set_page_config(layout="wide", page_title="Multibeam Echosounder Mills Cross Simulator")
 
@@ -130,12 +131,20 @@ def update_to_custom_sediment():
 with st.sidebar.container(border=True):
     st.subheader("Interactive Beam Query")
     queried_angle = st.number_input("Query Array Relative Beam Axis Depression Angle (°)", min_value=-75.0, max_value=75.0, value=45.0, step=1.0)
-# add horizontal angle
 
+# Environment and seafloor characteristics
 st.sidebar.header("Environment and Seafloor Characteristics")
-with st.sidebar.expander("Environment", expanded=False):
-    depth = st.number_input("Depth (m)", min_value=1.0, max_value=12000.0, value=50.0, step=0.01)
-    c_sound = st.number_input("Sound Speed (m/s)", min_value=1400.0, max_value=1600.0, value=1500.0, step=0.01, key="env_sv", on_change=update_from_sv)
+with st.sidebar.expander("Depth and Slope", expanded=False):
+    depth = st.number_input("Depth (m)", min_value=1.0, max_value=12000.0, value=50.0, step=0.01, help="Distance of seafloor from array at nadir")
+    ui_slope_x = st.number_input("Across-Track Slope (°)", min_value=-45.0, max_value=45.0, value=0.0, step=1.0,
+                                 help="+ve port up")
+    sf_slope_x = -ui_slope_x # fix for me getting the rotational convention wrong downstream
+    sf_slope_y = st.number_input("Along-Track Slope (°)", min_value=-45.0, max_value=45.0, value=0.0, step=1.0,
+                                 help="+ve bow up")
+
+with st.sidebar.expander("Oceanography", expanded=False):
+    c_sound = st.number_input("Sound Speed (m/s)", min_value=1400.0, max_value=1600.0, value=1500.0, step=0.01, key="env_sv", on_change=update_from_sv,
+                              help="Sound speed at the array. This simulator assumes a completely homogenous volume of water from the array to the seafloor.")
     water_temp = st.number_input("Water Temperature (°C)", min_value=-6.0, max_value=35.0, value=10.0, step=0.01, key="env_temp", on_change=update_from_temp)
     salinity = st.number_input("Salinity (ppt)", min_value=5.0, max_value=50.0, value=35.0, step=0.01, key="env_sal", on_change=update_from_salinity)
     ph_level = 8.0 # hard coding this for simplicity at this point in time, due to negligible effect on most common MBES frequencies
@@ -155,6 +164,7 @@ with st.sidebar.expander("Environment", expanded=False):
             help="The surface sound speed value used by the acquisition software. If this differs from the true surface sound speed, refraction artifacts will appear. Note that this will also impact the launch angle of a given beam from the transducer, if different from the real surface sound speed."
         )
 
+# Seafloor target strength
 with st.sidebar.expander("Seafloor Target Strength", expanded=False):
     st.selectbox("Sediment Type",
                  options=["Mud", "Sand", "Gravel", "Custom"],
@@ -179,37 +189,37 @@ with st.sidebar.expander("Seafloor Target Strength", expanded=False):
     # Convert to rads for the math engine
     crit_angle_rad = np.radians(crit_angle_deg)
 
-    apply_tvg = st.checkbox("Apply TVG to Heatmap", value=True)
-
+# Vessel Motion and Alignment sub-section
 st.sidebar.header("Vessel Motion and Alignment")
+
 # Dynamic Motion
 with st.sidebar.expander("Vessel Motion", expanded=False):
     c1, c2, c3 = st.columns(3)
-    imu_roll = c1.number_input("Roll (°)", min_value=-45.0, max_value=45.0, value=0.0, step=1.0)
-    imu_pitch = c2.number_input("Pitch (°)", min_value=-45.0, max_value=45.0, value=0.0, step=1.0)
-    imu_yaw = c3.number_input("Yaw (°)", min_value=-45.0, max_value=45.0, value=0.0, step=1.0)
+    imu_roll = c1.number_input("Roll (°)", min_value=-45.0, max_value=45.0, value=0.0, step=1.0, help="+ve port up")
+    imu_pitch = c2.number_input("Pitch (°)", min_value=-45.0, max_value=45.0, value=0.0, step=1.0, help="+ve bow up")
+    imu_yaw = c3.number_input("Yaw (°)", min_value=-45.0, max_value=45.0, value=0.0, step=1.0, help='+ve clockwise')
 
-# Static Mounting Biases
+# Static Mounting Errors
 with st.sidebar.expander("Array Mounting Errors", expanded=False):
     st.markdown("**TX Array Mounting Errors**")
     c1, c2, c3 = st.columns(3)
-    tx_roll_bias = c1.number_input("TX Roll (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
-    tx_pitch_bias = c2.number_input("TX Pitch (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
-    tx_yaw_bias = c3.number_input("TX Yaw (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
+    tx_roll_bias = c1.number_input("TX Roll (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1, help="+ve port up")
+    tx_pitch_bias = c2.number_input("TX Pitch (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1, help="+ve bow up")
+    tx_yaw_bias = c3.number_input("TX Yaw (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1, help="+ve clockwise")
 
     st.markdown("**RX Array Mounting Errors**")
     c4, c5, c6 = st.columns(3)
-    rx_roll_bias = c4.number_input("RX Roll (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
-    rx_pitch_bias = c5.number_input("RX Pitch (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
-    rx_yaw_bias = c6.number_input("RX Yaw (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1)
+    rx_roll_bias = c4.number_input("RX Roll (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1, help="+ve port up")
+    rx_pitch_bias = c5.number_input("RX Pitch (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1, help="+ve bow up")
+    rx_yaw_bias = c6.number_input("RX Yaw (°)", min_value=-45.0, max_value=45.0, value=0.0, step=0.1, help="+ve clockwise")
 
 # Motion Stabilization
 with st.sidebar.expander("Motion Stabilization", expanded=False):
-    auto_roll = st.checkbox("Roll Stabilization (RX)", value=True)
-    auto_pitch = st.checkbox("Pitch Stabilization (TX)", value=True)
-    auto_yaw = st.checkbox("Yaw Stabilization (TX)", value=True)
+    auto_roll = st.checkbox("Roll Stabilization (RX)", value=True, help="Stabilization is only capable of compensating for roll values up to 10°.")
+    auto_pitch = st.checkbox("Pitch Stabilization (TX)", value=True, help="Stabilization is only capable of compensating for pitch values up to 10°.")
+    auto_yaw = st.checkbox("Yaw Stabilization (TX)", value=True, help="Stabilization is only capable of compensating for yaw/heading values up to 10°.")
 
-
+# System Parameters sub-section
 st.sidebar.header("System Parameters")
 
 with st.sidebar.expander("Array Specifications", expanded=False):
@@ -287,9 +297,9 @@ with st.sidebar.expander("Pulse Specifications", expanded=False):
     # Case for valid CW mode
     elif not st.session_state.cw_lock:
         st.success(f"**Active Mode: Custom CW Pulse (TB = {time_bw_product:.2f})**")
+
 st.sidebar.header("Visualization Toggles")
 with st.sidebar.expander("Visualize Acoustic Lobes", expanded=False):
-
     st.markdown("**Theoretical Beam Patterns (Relative dB)**")
     show_tx_solid = st.checkbox("TX Directivity Pattern (Blue)", value=True)
     if show_tx_solid and num_sectors > 1:
@@ -298,21 +308,11 @@ with st.sidebar.expander("Visualize Acoustic Lobes", expanded=False):
     show_rx_solid = st.checkbox("RX Directivity Pattern (Red)", value=True)
     show_combined_solid = st.checkbox("Combined Effective Beam", value=True)
 
-    st.markdown("**Detection Envelopes (Physical Range)**")
-    show_tx_ghost = st.checkbox("TX Ensonified Volume", value=False)
-    if show_tx_ghost and num_sectors > 1:
-        st.warning(
-            "Note: The 3D TX lobe display does not support simultaneous multi-sector visualization. It currently renders the active queried sector only.")
-    show_rx_ghost = st.checkbox("RX Noise-Limited Range", value=False)
-    show_combined_ghost = st.checkbox("Combined Detection Envelope", value=False)
-    # Commenting out the below snippet because I originally added the total swath envelope view as a toggle,
-    # but realized it was clearly better at visualizing the limit than the simple expansion/shrinking method done only at the queried beam angle.
-    # lobe_calc_mode = st.radio(
-    #     "Lobe Range Boundary Mode",
-    #     options=["Queried Beam Capacity", "Total Swath Envelope"],
-    #     help="Queried Capacity shows the isolated limit of the selected beam. Total Envelope applies Lambertian decay across the entire footprint."
-    # )
-    lobe_calc_mode = "Total Swath Envelope"
+with st.sidebar.expander("Visualize Detection Limits",expanded=False):
+    show_queried_beam_limit = st.checkbox("Queried Beam Detection Limit", value=False,
+                                          help="Represents the dynamic, two-way detection limit for the queried beam, resulting from either SNR or phase uncertainty.")
+    show_total_swath_envelope = st.checkbox("Total Swath Detection Envelope", value=False,
+                                            help="Represents the system's maximum detection capabilities across all steering angles, accounting for SNR and phase uncertainty.")
 
 # --- Math & Geometry ---
 # True Mechanical Orientations (IMU Dynamic Motion + Static Mounting Biases)
@@ -467,7 +467,7 @@ def get_sediment_ts(inc_angle_rad, area_sqm):
     # Area scattering
     area_scattering = 10 * np.log10(area_sqm + 1e-12)
 
-    # add values as done in OE874 Lab C
+    # Add values as done in OE874 Lab C
     return lambert + specular + area_scattering
 
 # --- 3-Axis Rotation Matrix (Tait-Bryan Yaw-Pitch-Roll) ---
@@ -490,6 +490,49 @@ R_rx_mech = get_rotation_matrix(true_rx_roll, true_rx_pitch, true_rx_yaw)
 # Ideal Matrices (Includes IMU motion and assumes no mounting biases)
 R_tx_ideal = get_rotation_matrix(imu_roll, imu_pitch, imu_yaw)
 R_rx_ideal = get_rotation_matrix(imu_roll, imu_pitch, imu_yaw)
+
+
+@njit(fastmath=True)
+def get_seafloor_z(x, y, base_depth, slope_x_val, slope_y_val):
+    """Returns the Z depth of the 2.5D procedural seafloor at a specific X, Y coordinate."""
+    return base_depth - (x * slope_x_val) - (y * slope_y_val)
+
+
+@njit(fastmath=True)
+def raycast_to_bottom(v_ray, base_depth, slope_x_val, slope_y_val, max_range=5000.0):
+    """Shoots a 3D ray along the vector using adaptive step sizes until it hits the terrain."""
+    # Normalize the ray vector
+    norm_v = np.sqrt(v_ray[0] ** 2 + v_ray[1] ** 2 + v_ray[2] ** 2)
+    if norm_v == 0 or v_ray[2] <= 1e-6:
+        return np.array([0.0, 0.0, 0.0])
+
+    u_ray = v_ray / norm_v
+    current_range = 0.0
+
+    while current_range < max_range:
+        pos = u_ray * current_range
+        terrain_z = get_seafloor_z(pos[0], pos[1], base_depth, slope_x_val, slope_y_val)
+
+        distance_to_bottom = terrain_z - pos[2]
+
+        if distance_to_bottom <= 0.01:  # Register a hit within 1 centimeter
+            return pos
+
+        # Step forward by half the vertical distance to prevent overshooting
+        step_size = max(0.01, distance_to_bottom * 0.5)
+        current_range += step_size
+
+    return np.array([0.0, 0.0, 0.0])  # Ray missed or went out of bounds
+
+
+def get_surface_normal(across_track_deg, along_track_deg):
+    """Calculates the upward-pointing 3D surface normal vector of the sloped terrain."""
+    dz_dx = np.tan(np.radians(along_track_deg))
+    dz_dy = np.tan(np.radians(across_track_deg))
+
+    # Multiply by -1 so the normal vector points upward (out of the seafloor)
+    normal = np.array([-dz_dx, -dz_dy, -1.0])
+    return normal / np.linalg.norm(normal)
 
 
 # --- Mills Cross Intersection Solving ---
@@ -527,12 +570,12 @@ def solve_mills_cross_intersection(R_tx, R_rx, tx_steer_rad, rx_steer_rad, seafl
     bv_p = np.array([np.sin(tx_steer_rad), y1 + y2, np.sqrt(1.0 - rho_hor_sq)])
     bv_geo = np.dot(Tp, bv_p)
 
-    # Project to flat seafloor
-    if bv_geo[2] < 1e-6:
-        return np.array([0.0, 0.0, 0.0])
+    # Convert slope degrees into tangent scalars for the heightmap math
+    slope_x_val = np.tan(np.radians(sf_slope_y))
+    slope_y_val = np.tan(np.radians(sf_slope_x))
 
-    scale = seafloor_depth / bv_geo[2]
-    return bv_geo * scale
+    dynamic_max_range = seafloor_depth * 15.0
+    return raycast_to_bottom(bv_geo, seafloor_depth, slope_x_val, slope_y_val, max_range=dynamic_max_range)
 
 def generate_array_weights(N, shading="Hamming", atten_db=30.0):
     """Pre-calculates the amplitude weights for an N-element array."""
@@ -665,7 +708,7 @@ for start_angle, end_angle in sector_limits:
     # --- Apply visual padding to encapsulate the edge beams ---
     # I'm not sure if this is the best solution to an open problem I have. I don't know if the outermost beam angle should be shown
     # to project out beyond the swath extent, since I am currently unclear on how the outermost sounding is derived in typical systems (e.g. is it from the
-    # acoustic center or the outermost across-track extent of the beam footprint? Currently, the visual extends the tx sector limit to
+    # acoustic center or the outermost across-track extent of the beam footprint)? Currently, the visual extends the tx sector limit to
     # encapsulate the whole outermost beam footprint. NEEDS TO BE REVISITED!!!
 
     # Find the most extreme edge of this specific sector
@@ -813,20 +856,24 @@ if has_overlap:
     else:
         range_res_m = c_sound * effective_pulse_duration_s / 2.0  # CW Tapered Spatial Resolution
 
-    # Project pulse thickness onto flat seafloor
-    incidence_angle = abs(theta_rad)
+    # Calculate true local incidence angle using 3D dot product
+    surface_normal = get_surface_normal(sf_slope_x, sf_slope_y)
+    v_ray = pt_physical / np.linalg.norm(pt_physical) if np.linalg.norm(pt_physical) > 0 else np.array([0, 0, -1])
+
+    cos_inc = np.dot(-v_ray, surface_normal)
+    incidence_angle = np.arccos(np.clip(cos_inc, 0.0, 1.0))
     projected_pulse_width = range_res_m / max(1e-6, np.sin(incidence_angle))
 
     # Geometric across-track length of the patch
     geo_width = 2.0 * b
 
     is_pulse_limited = False
-    active_patch_area = patch_area
+    ensonified_area = patch_area
 
     # Check if pulse is shorter than footprint
     if projected_pulse_width < geo_width and incidence_angle >= np.radians(2.0):
         is_pulse_limited = True
-        active_patch_area = np.pi * a * (projected_pulse_width / 2.0)
+        ensonified_area = np.pi * a * (projected_pulse_width / 2.0)
 
     # Calculate number of pulse slices
     num_cells = max(1, int(geo_width / projected_pulse_width))
@@ -870,7 +917,7 @@ if has_overlap:
 
 else:
     patch_area = 0.0
-    active_patch_area = 0.0
+    ensonified_area = 0.0
     range_res_m = 0.0
     is_pulse_limited = False
     num_cells = 0
@@ -938,7 +985,7 @@ dynamic_ts = 0.0
 relative_intensity = 0.0
 absolute_pressure = 0.0
 status_text = ":red[Not Detected]"
-tvg_display = "N/A"
+snr_display = "N/A"
 
 if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
     slant_range_m = np.linalg.norm(pt_physical)
@@ -948,8 +995,8 @@ if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
     absorption_loss = 2 * alpha_db_m * slant_range_m
     two_way_tl = spreading_loss + absorption_loss
 
-    # Base Geometry and Signal Strength
-    projected_pulse_width = range_res_m / max(1e-6, np.sin(abs(theta_rad)))
+    # Base geometry and signal strength
+    projected_pulse_width = range_res_m / max(1e-6, np.sin(incidence_angle))
 
     A_beam = np.pi * a * b
     A_spherical = 2.0 * np.pi * slant_range_m * range_res_m
@@ -957,7 +1004,7 @@ if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
 
     actual_area = min(A_beam, A_spherical, A_annulus)
 
-    dynamic_ts = get_sediment_ts(np.radians(queried_angle), actual_area)
+    dynamic_ts = get_sediment_ts(incidence_angle, actual_area)
     relative_intensity = dynamic_ts - two_way_tl
     absolute_pressure = source_level + relative_intensity + processing_gain
     snr_db = absolute_pressure - effective_noise_level
@@ -970,20 +1017,30 @@ if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
 
     # Geometric smearing
     w_geo = 2.0 * b
-    t_env = (w_geo * np.sin(abs(theta_rad)) / c_sound) + tau_eff
+    t_env = (w_geo * np.sin(incidence_angle) / c_sound) + tau_eff
     N_samples = max(1.0, t_env * bandwidth_hz)
 
-    # QF Amplitude
-    dt_amp = 0.15 * (t_env / np.sqrt(N_samples))
-    dt_amp_tot = np.sqrt(dt_amp ** 2 + (tau_eff ** 2 / 12.0))
-    QF_A = np.log10(max(1.0, t_twtt / dt_amp_tot))
+    # --- Amplitude QF ---
+    # Speckle-induced time uncertainty (Lurton & Augustin)
+    dt_speckle = 0.15 * (t_env / np.sqrt(N_samples))
+
+    # Additive Noise-induced time uncertainty
+    dt_noise = t_env / np.sqrt(2.0 * max(1e-6, snr_linear))
+
+    # Total Amplitude time uncertainty (Sum of Variances)
+    dt_amp_tot = np.sqrt(dt_speckle ** 2 + dt_noise ** 2 + (tau_eff ** 2 / 12.0))
+
+    qf_amp_linear = t_twtt / dt_amp_tot
+    QF_A = np.log10(max(1.0, qf_amp_linear))
 
     # QF Phase
     QF_Phi = 0.0
     if A_annulus < A_beam and snr_linear > 0.01:
         d_phi = np.sqrt(1.0 / (N_samples * snr_linear))
+        # Note: array foreshortening uses the physical array steering angle
         d_theta = (wavelength / (2.0 * np.pi * interferometer_spacing * max(1e-6, np.cos(abs(theta_rad))))) * d_phi
-        dt_phi = t_twtt * np.tan(abs(theta_rad)) * d_theta
+        # Note: time uncertainty is driven by the slope of the seafloor
+        dt_phi = t_twtt * np.tan(incidence_angle) * d_theta
         dt_phi_tot = np.sqrt(dt_phi ** 2 + (tau_eff ** 2 / 12.0))
         QF_Phi = np.log10(max(1.0, t_twtt / dt_phi_tot))
 
@@ -991,35 +1048,35 @@ if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
     best_QF = max(QF_A, QF_Phi)
     if snr_db > 5.0 and best_QF >= 2.5:
         status_text = ":green[Detected]"
-        tvg_display = f"{dynamic_ts:.1f} dB"
+        snr_display = f"{snr_db:.1f} dB"
         detection_method = "Amplitude" if QF_A >= QF_Phi else "Phase"
     else:
         status_text = ":red[Not Detected]"
-        tvg_display = "N/A"
+        snr_display = f"{snr_db:.1f} dB" if patch_area > 0 else "N/A"
         detection_method = ":red[Failed]"
 
 # --- UI Tabs for Metrics and Theoretical Array Specs ---
-tab1, tab2 = st.tabs(["Query Metrics", "Theoretical Array Specifications (Nominal 1500 m/s)"])
+tab1, tab2, tab3 = st.tabs(["Query Metrics", "Theoretical Array Specifications (Nominal 1500 m/s)", "Sonar Equation"])
 
 with tab1:
     col1, col2, col3, col4, col5, col6 = st.columns(6)
-    col1.metric("Alongtrack Deviation (X)", f"{delta_x:.2f} m")
-    col2.metric("Acrosstrack Deviation (Y)", f"{delta_y:.2f} m")
-    col3.metric("Vertical Deviation (Z)", f"{delta_z:.2f} m")
+    col1.metric("Alongtrack Deviation (X)", f"{delta_x:.2f} m", help="X deviation (+ve fwd) of the software calculated sounding wrt the assumed sounding position. Assumed sounding can be thought of as where the sonar system believes it is locating the sounding, with no mounting biases and no refraction errors. This is not a comparison of the red vector and the blue vector, but the orange dashed vector and the blue vector.")
+    col2.metric("Acrosstrack Deviation (Y)", f"{delta_y:.2f} m", help="Y deviation (+ve stbd) of the software calculated sounding wrt the assumed sounding position. Assumed sounding can be thought of as where the sonar system believes it is locating the sounding, with no mounting biases and no refraction errors. This is not a comparison of the red vector and the blue vector, but the orange dashed vector and the blue vector.")
+    col3.metric("Vertical Deviation (Z)", f"{delta_z:.2f} m", help="Z deviation (+ve down) of the software calculated sounding wrt the assumed sounding position. Assumed sounding can be thought of as where the sonar system believes it is locating the sounding, with no mounting biases and no refraction errors. This is not a comparison of the red vector and the blue vector, but the orange dashed vector and the blue vector.")
     col4.metric("Inside TX Fan?", tx_status)
     col5.metric("Inside RX Listening Area?", rx_status)
     col6.metric("Along Track Patch Width", f"{tx_x_width:.2f} m")
 
     acol1, acol2, acol3, acol4, acol5, acol6 = st.columns(6)
-    acol1.metric("Detection Status", status_text)
-    acol2.metric("Detection Method", detection_method)
-    acol3.metric("Quality Factor", f"{best_QF:.2f}")
-    acol4.metric("TVG Return Intensity", tvg_display)
-    acol5.metric("Raw Return Pressure", f"{absolute_pressure:.1f} dB")
+    acol1.metric("Detection Status", status_text, help="Reports whether the returning echo survived the QF and SNR thresholds.")
+    acol2.metric("Detection Method", detection_method, help="Reports the method used by the system to detect the return echo of the queried beam.")
+    acol3.metric("Quality Factor (QF)", f"{best_QF:.2f}", help="Logarithmic confidence score of the time of arrival accuracy of the return echo. Values below 2.5 indicate the signal is too degraded to be logged as a bottom return.")
+    acol4.metric("Signal-to-Noise Ratio (SNR)", snr_display)
+    acol5.metric("Raw Return Pressure", f"{absolute_pressure:.1f} dB", help="Absolute acoustic pressure that arrives at the transducer face. Accounts for SL, TL, and TS of ensonified area.")
     if is_pulse_limited:
-        acol6.metric("Active Area (Pulse-Limited)", f"{active_patch_area:.2f} m²")
+        acol6.metric("Ensonified Area (Pulse-Limited)", f"{ensonified_area:.2f} m²", help="Physical surface area of the seafloor contributing to the return echo. Pulse limited indicates phase detection may be possible.")
     else:
-        acol6.metric("Active Area (Beam-Limited)", f"{active_patch_area:.2f} m²")
+        acol6.metric("Ensonified Area (Beam-Limited)", f"{ensonified_area:.2f} m²", help="Physical surface area of the seafloor contributing to the return echo. Beam-limited indicates amplitude detection is likely.")
 
 with tab2:
     # Calculate UI variables matching the math engine
@@ -1059,17 +1116,60 @@ with tab2:
     hw5.metric("RX Elements", f"{N_rx_ui}")
     hw6.metric("Effective RX BW", f"{eff_rx_deg:.2f}°", delta=rx_delta, delta_color="inverse")
 
+with tab3:
+    st.latex(r"SNR = SL - 2TL + TS + PG - (NL - DI_{RX})")
+    st.latex(r"""
+        \begin{aligned}
+        2TL &= 40\log_{10}(R) + 2\alpha R \\
+        TS &= BS_{Lambert}(\theta) + BS_{Specular}(\theta) + 10\log_{10}(A) \\
+        PG &= 10\log_{10}(\tau \cdot BW) \\
+        NL &= N_{0} + 10\log_{10}(BW) \\
+        DI_{RX} &= 10\log_{10}\left(\frac{2L_{RX}}{\lambda}\right)
+        \end{aligned}
+        """)
+
+    if np.linalg.norm(pt_physical) > 0 and patch_area > 0:
+        s1, s2, s3, s4, s5, s6 = st.columns(6)
+        s1.metric("Source Level (SL)", f"{source_level:.1f} dB")
+        s2.metric("Two-Way Transmission Loss (2TL)", f"-{two_way_tl:.1f} dB", help="Spreading Loss + Absorption Loss")
+        s3.metric("Target Strength (TS)", f"{dynamic_ts:.1f} dB",
+                  help="Seafloor target strength based on incidence angle and ensonified area")
+        s4.metric("Processing Gain (PG)", f"+{processing_gain:.1f} dB",
+                  help="Signal processing gain from Time-Bandwidth product (Matched Filter). Non-zero values will only appear for FM pulses.")
+        s5.metric("Noise Level (NL)", f"-{total_noise_level:.1f} dB",
+                  help="Ambient spectrum level escalated by receiver bandwidth")
+        s6.metric("RX Directivity Index (DI)", f"+{DI_rx:.1f} dB",
+                  help="Spatial filtering gain of the physical hydrophone array length")
+
+        st.success(
+            f"**Final Calculation:** {source_level:.1f} - {two_way_tl:.1f} + {dynamic_ts:.1f} + {processing_gain:.1f} - ({total_noise_level:.1f} - {DI_rx:.1f}) = **{snr_db:.1f} dB SNR**")
+    else:
+        st.warning("Query a valid seafloor intersection to calculate the Sonar Equation.")
+
 # --- GRAPH TOGGLES ---
 with st.sidebar.expander("Visualize Intersection Elements", expanded=False):
-    show_ideal_tx = st.checkbox("Assumed TX Sectors", value=False)
-    show_actual_tx = st.checkbox("Actual TX Sectors", value=True)
-    show_rx_red = st.checkbox("RX Footprint", value=True)
-    show_rx_listening_env = st.checkbox("RX Listening Envelope", value=True)
+    show_ideal_tx = st.checkbox("Assumed TX Sectors (3 dB limit)", value=False) # move these 3 db limit tags to the legend instead
+    show_actual_tx = st.checkbox("Actual TX Sectors (3 dB limit)", value=True) # move these 3 db limit tags to the legend instead
+    show_rx_red = st.checkbox("RX Footprint (3 dB limit)", value=True) # move these 3 db limit tags to the legend instead
+    show_rx_listening_env = st.checkbox("RX Listening Corridor", value=True)
     show_heatmap = st.checkbox("Beam Pattern Heatmap", value=True)
+    if show_heatmap:
+        spacer, content = st.columns([0.5, 10])
+        with content:
+            heatmap_mode = st.radio(
+                "Heatmap Visualization Mode",
+                options=[
+                    "Theoretical Footprint",
+                    "Raw Received Level",
+                    "TVG Compensated"
+                ],
+            )
+    else:
+        heatmap_mode = "None"
 
 with st.sidebar.expander("Visualize Soundings", expanded=False):
     show_ideal_soundings = st.checkbox("Assumed Soundings (100 beams)", value=False)
-    show_software_soundings = st.checkbox("Software Calculated Soundings (100 beams)", value=True)
+    show_software_soundings = st.checkbox("Software Calculated Soundings (100 beams)", value=False)
 
 # --- Equidistant beam math (100 beams for simplicity) ---
 # I believe this implementation is now fixed! However, not sure if this is best controlled by user from "target swath coverage" - might be counterintuitive,
@@ -1152,7 +1252,7 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
     nominal_range_x = depth * np.tan(np.radians(tx_beamwidth * span_factor))
     nominal_range_y = depth * np.tan(np.radians(rx_beamwidth * span_factor)) / (np.cos(theta_rad) ** 2)
 
-    # Identify larger small axis beamwidth and set for suare map rendering
+    # Identify larger small axis beamwidth and set for square map rendering size
     grid_range = max(10.0, nominal_range_x, nominal_range_y)
 
     grid_range_x = grid_range
@@ -1161,29 +1261,58 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
     # Generate centered on actual sounding point
     x_g = np.linspace(pt_physical[0] - grid_range_x, pt_physical[0] + grid_range_x, 100)
     y_g = np.linspace(pt_physical[1] - grid_range_y, pt_physical[1] + grid_range_y, 100)
+
     X_grid, Y_grid = np.meshgrid(x_g, y_g)
-    Z_grid = np.full_like(X_grid, depth)
+
+    # Procedurally tilt the visual Z-grid based on the slope values
+    slope_x_val = np.tan(np.radians(sf_slope_y))
+    slope_y_val = np.tan(np.radians(sf_slope_x))
+    Z_grid = depth - (X_grid * slope_x_val) - (Y_grid * slope_y_val)
+
     Intensity_dB = np.zeros_like(X_grid)
+    surface_normal = get_surface_normal(sf_slope_x, sf_slope_y)
 
     # Calculate alpha once for whole grid
     alpha_db_m = calculate_absorption_fg(frequency, water_temp, salinity, depth, ph_level, c_sound)
 
     # Dynamically anchor color scale to nadir values so it never blanks out
     nadir_tl = 40 * np.log10(depth) + 2 * alpha_db_m * depth
-    dynamic_range_span_db = 40.0  # range set to capture side lobes
 
-    if apply_tvg:
-        cbar_title = "TVG Corrected Intensity (dB)"
-        cmax_val = dynamic_ts
+    # Global color scale anchoring
+    nadir_a = depth * np.tan(tx_bw_rad / 2.0)
+    nadir_b = depth * np.tan(rx_bw_rad / 2.0)
+    A_beam_nadir = np.pi * nadir_a * nadir_b
+    nadir_ts = get_sediment_ts(0.0, A_beam_nadir)
+    nadir_tl = 40 * np.log10(depth) + 2 * alpha_db_m * depth
+
+    pure_noise_linear = 10.0 ** (effective_noise_level / 10.0)
+    pure_noise_normalized = (10.0 * np.log10(pure_noise_linear)) - source_level - processing_gain
+
+    dynamic_range_span_db = 55.0 # somewhat arbitrary span value to capture "relevant" values in the heatmap while looking nice
+
+    # Set color bar based on which mode is selected
+    if heatmap_mode == "Theoretical Footprint":
+        cbar_title = "Combined Two-Way Directivity (dB)"
+        cmax_val = 0.0
+        cmin_val = -dynamic_range_span_db
+    elif heatmap_mode == "TVG Compensated":
+        cbar_title = "TVG Compensated"
+        cmax_val = nadir_ts
         cmin_val = cmax_val - dynamic_range_span_db
-    else:
-        cbar_title = "Raw Intensity (dB)"
-        # Shift scale ceiling down by best-case physical scenario (Nadir TL)
-        cmax_val = dynamic_ts - nadir_tl
-        cmin_val = cmax_val - dynamic_range_span_db
+    else:  # Raw received Level
+        cbar_title = "Raw Received Level"
+        cmax_val = nadir_ts - nadir_tl
+        cmin_val = pure_noise_normalized
+        if cmax_val - cmin_val < 10.0:
+            cmax_val = cmin_val + dynamic_range_span_db
+
+    # Generate a grid of speckle noise (exponential distribution for acoustic intensity)
+    speckle_matrix = np.random.exponential(1.0, size=X_grid.shape)
 
     for i in range(X_grid.shape[0]):
         for j in range(X_grid.shape[1]):
+
+            # Calculate geometry and physics for the pixel
             P = np.array([X_grid[i, j], Y_grid[i, j], Z_grid[i, j]])
             R = np.linalg.norm(P)
 
@@ -1192,7 +1321,7 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
 
             v_geo = P / R
 
-            # Array Directivity (Using physically refracted actual angles)
+            # Array Directivity (uses physically refracted actual angles)
             D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_actual_rad, is_tx=True)
             D_rx = calculate_directivity(v_geo, R_rx_mech, theta_actual_rad, is_tx=False)
             I_linear = np.abs(D_tx * D_rx)
@@ -1201,14 +1330,14 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
             # Transmission Loss
             two_way_tl = 40 * np.log10(R) + 2 * alpha_db_m * R
 
-            # Lambertian Target Strength Geometry
-            cos_theta = abs(Z_grid[i, j]) / R
+            # Lambertian target strength geometry
+            cos_theta = np.dot(-v_geo, surface_normal)
             inc_angle = np.arccos(np.clip(cos_theta, 0.0, 1.0))
 
             pixel_b_half = (R * np.tan(dynamic_rx_bw_rad / 2.0)) / max(1e-6, cos_theta)
             pixel_geo_width = 2.0 * pixel_b_half
 
-            # --- Unified Physical Area Calculation ---
+            # Physical area calculation
             A_beam = np.pi * (R * np.tan(dynamic_tx_bw_rad / 2.0)) * pixel_b_half
             A_spherical = 2.0 * np.pi * R * range_res_m
 
@@ -1223,33 +1352,32 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
             pixel_ts = get_sediment_ts(inc_angle, pixel_area)
             pixel_snr_base = source_level - two_way_tl + pixel_ts + DI_dB + processing_gain - effective_noise_level
 
-            # --- QF Pixel Evaluation ---
-            tau_eff = (2.0 * range_res_m) / c_sound
-            interferometer_spacing = L_rx / 2.0
-            t_twtt = (2.0 * R) / c_sound
-            snr_linear = 10.0 ** (pixel_snr_base / 10.0)
+            # Heatmap mode selection math
+            if heatmap_mode == "Theoretical Footprint":
+                # Visual of hardware directivity
+                Intensity_dB[i, j] = DI_dB
 
-            t_env = (pixel_geo_width * np.sin(inc_angle) / c_sound) + tau_eff
-            N_samples = max(1.0, t_env * bandwidth_hz)
+            else:
+                # Realistic Signal + Noise Math
+                pixel_signal_lvl = source_level - two_way_tl + pixel_ts + DI_dB + processing_gain
+                signal_linear = 10.0 ** (pixel_signal_lvl / 10.0)
 
-            # QF Amplitude
-            dt_amp = 0.15 * (t_env / np.sqrt(N_samples))
-            dt_amp_tot = np.sqrt(dt_amp ** 2 + (tau_eff ** 2 / 12.0))
-            QF_A = np.log10(max(1.0, t_twtt / dt_amp_tot))
+                # Apply speckle fading to return signal
+                speckle_factor = speckle_matrix[i, j]
+                faded_signal_linear = signal_linear * speckle_factor
 
-            # QF Phase
-            QF_Phi = 0.0
-            if A_annulus < A_beam and snr_linear > 0.01:
-                d_phi = np.sqrt(1.0 / (N_samples * snr_linear))
-                d_theta = (wavelength / (2.0 * np.pi * interferometer_spacing * max(1e-6, np.cos(inc_angle)))) * d_phi
-                dt_phi = t_twtt * np.tan(inc_angle) * d_theta
-                dt_phi_tot = np.sqrt(dt_phi ** 2 + (tau_eff ** 2 / 12.0))
-                QF_Phi = np.log10(max(1.0, t_twtt / dt_phi_tot))
+                # Add ambient noise
+                total_power_linear = faded_signal_linear + pure_noise_linear
+                total_rl_db = 10.0 * np.log10(total_power_linear)
+                normalized_rl = total_rl_db - source_level - processing_gain
 
-            # --- Hardware Selection ---
-            Intensity_dB[i, j] = pixel_ts + DI_dB if apply_tvg else pixel_ts - two_way_tl + DI_dB
+                if heatmap_mode == "TVG Compensated":
+                    # Applies TVG amplifier to the noisy signal
+                    Intensity_dB[i, j] = normalized_rl + two_way_tl
+                else:
+                    # Raw noisy signal hitting the hydrophone
+                    Intensity_dB[i, j] = normalized_rl
 
-    # Plot the Surface
     fig.add_trace(go.Surface(
         x=X_grid, y=Y_grid, z=Z_grid,
         surfacecolor=Intensity_dB,
@@ -1261,213 +1389,145 @@ if show_heatmap and np.linalg.norm(pt_physical) > 0:
     ))
 
 # --- 3D Acoustic Lobes ---
-if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_combined_solid or show_combined_ghost) and np.linalg.norm(pt_physical) > 0:
+if (show_tx_solid or show_rx_solid or show_combined_solid or show_queried_beam_limit or show_total_swath_envelope) and np.linalg.norm(
+        pt_physical) > 0:
+    # Ensure surface normal is globally available for the warping envelopes
+    surface_normal = get_surface_normal(sf_slope_x, sf_slope_y)
+
     # Find max Two-Way Transmission Loss
     max_allowable_tl = source_level + dynamic_ts + processing_gain - effective_noise_level
 
     # Calculate absorption for lobes
     lobe_alpha_db_m = calculate_absorption_fg(frequency, water_temp, salinity, depth, ph_level, c_sound)
+    # Total Swath Envelope: Pre-calculate a lookup table from 0 to 90 degrees
+    interp_angles_rad = np.linspace(0, np.pi / 2, 181)
+    interp_r_max = np.zeros_like(interp_angles_rad)
 
-    # Iterative binary solver to find max detection range (R_max)
-    if lobe_calc_mode == "Queried Beam Capacity":
-        if not is_pulse_limited:
-            active_threshold = 10.0
-        else:
-            active_threshold = 0.0
+    for idx, ang_rad in enumerate(interp_angles_rad):
 
-        # Physics budget for this specific beam (threshold only)
-        point_max_allowable_tl = max_allowable_tl - active_threshold
+        # --- Localized beamwidth math ---
+        # Baseline footprint geometry
+        loop_tx_bw_rad = tx_bw_rad / max(1e-6, np.cos(tx_steer_rad))
+        loop_rx_bw_rad = rx_bw_rad / max(1e-6, np.cos(ang_rad))
 
-        if point_max_allowable_tl <= 0:
-            lobe_scale = 1.0
-        else:
-            r_min, r_max = 1.0, 20000.0
-            for _ in range(50):
-                r_mid = (r_min + r_max) / 2.0
-                tl_test = 40 * np.log10(r_mid) + 2 * lobe_alpha_db_m * r_mid
-                if tl_test < point_max_allowable_tl:
-                    r_min = r_mid
-                else:
-                    r_max = r_mid
-            lobe_scale = r_mid
+        # Fundamental time-resolution of the pulse
+        tau_eff = (2.0 * range_res_m) / c_sound
 
-    else:
-        # Total Swath Envelope: Pre-calculate a lookup table from 0 to 90 degrees
-        interp_angles_rad = np.linspace(0, np.pi / 2, 181)
-        interp_r_max = np.zeros_like(interp_angles_rad)
+        # Assumed split-aperture baseline (half the RX array length)
+        interferometer_spacing = L_rx / 2.0
 
-        for idx, ang_rad in enumerate(interp_angles_rad):
+        # Iterative bisection solver for QF = 2.5 threshold
+        r_min, r_max_test = 1.0, 20000.0
+        for _ in range(35):
+            r_test = (r_min + r_max_test) / 2.0
+            t_twtt = (2.0 * r_test) / c_sound
 
-            # --- Localized beamwidth math ---
-            # Baseline footprint geometry
-            loop_tx_bw_rad = tx_bw_rad / max(1e-6, np.cos(ang_rad))
-            loop_rx_bw_rad = rx_bw_rad / max(1e-6, np.cos(ang_rad))
+            # Area & Target Strength
+            a_radius = r_test * np.tan(loop_tx_bw_rad / 2.0)
+            b_radius = r_test * np.tan(loop_rx_bw_rad / 2.0) / max(1e-6, np.cos(ang_rad))
 
-            # Fundamental time-resolution of the pulse
-            tau_eff = (2.0 * range_res_m) / c_sound
+            A_beam = np.pi * a_radius * b_radius
+            A_spherical = 2.0 * np.pi * r_test * range_res_m
+            if ang_rad > 1e-6:
+                pw_loop = range_res_m / np.sin(ang_rad)
+                A_annulus = np.pi * a_radius * (pw_loop / 2.0)
+            else:
+                A_annulus = float('inf')
 
-            # Assumed split-aperture baseline (half the RX array length)
-            interferometer_spacing = L_rx / 2.0
+            area_actual = min(A_beam, A_spherical, A_annulus)
+            ts_actual = get_sediment_ts(ang_rad, area_actual)
 
-            # Iterative bisection solver for QF = 2.5 threshold
-            r_min, r_max_test = 1.0, 20000.0
-            for _ in range(35):
-                r_test = (r_min + r_max_test) / 2.0
-                t_twtt = (2.0 * r_test) / c_sound
+            # Linear SNR Ratio
+            tl_test = 40.0 * np.log10(r_test) + 2.0 * lobe_alpha_db_m * r_test
+            snr_db = source_level - tl_test + ts_actual + processing_gain - effective_noise_level
+            snr_linear = 10.0 ** (snr_db / 10.0)
 
-                # Area & Target Strength
-                a_radius = r_test * np.tan(loop_tx_bw_rad / 2.0)
-                b_radius = r_test * np.tan(loop_rx_bw_rad / 2.0) / max(1e-6, np.cos(ang_rad))
+            # Geometric echo smearing and independent samples
+            w_geo = 2.0 * b_radius
+            t_env = (w_geo * np.sin(ang_rad) / c_sound) + tau_eff
+            N_samples = max(1.0, t_env * bandwidth_hz)
 
-                A_beam = np.pi * a_radius * b_radius
-                A_spherical = 2.0 * np.pi * r_test * range_res_m
-                if ang_rad > 1e-6:
-                    pw_loop = range_res_m / np.sin(ang_rad)
-                    A_annulus = np.pi * a_radius * (pw_loop / 2.0)
-                else:
-                    A_annulus = float('inf')
+            # --- Estimator 1: Amplitude QF ---
+            # Speckle-induced time uncertainty (Lurton & Augustin)
+            dt_speckle = 0.15 * (t_env / np.sqrt(N_samples))
 
-                area_actual = min(A_beam, A_spherical, A_annulus)
-                ts_actual = get_sediment_ts(ang_rad, area_actual)
+            # Additive Noise-induced time uncertainty
+            dt_noise = t_env / np.sqrt(2.0 * max(1e-6, snr_linear))
 
-                # Linear SNR Ratio
-                tl_test = 40.0 * np.log10(r_test) + 2.0 * lobe_alpha_db_m * r_test
-                snr_db = source_level - tl_test + ts_actual + processing_gain - effective_noise_level
-                snr_linear = 10.0 ** (snr_db / 10.0)
+            # Total Amplitude time uncertainty (Sum of Variances)
+            dt_amp_tot = np.sqrt(dt_speckle ** 2 + dt_noise ** 2 + (tau_eff ** 2 / 12.0))
 
-                # Geometric Echo Smearing & Independent Samples
-                w_geo = 2.0 * b_radius
-                t_env = (w_geo * np.sin(ang_rad) / c_sound) + tau_eff
-                N_samples = max(1.0, t_env * bandwidth_hz)
+            qf_amp_linear = t_twtt / dt_amp_tot
+            QF_A = np.log10(max(1.0, qf_amp_linear))
 
-                # --- Estimator 1: Amplitude QF ---
-                dt_amp = 0.15 * (t_env / np.sqrt(N_samples))
-                dt_amp_tot = np.sqrt(dt_amp ** 2 + (tau_eff ** 2 / 12.0))
+            # --- Estimator 2: Phase QF ---
+            QF_Phi = 0.0
+            if A_annulus < A_beam and snr_linear > 0.01:
+                d_phi = np.sqrt(1.0 / (N_samples * snr_linear))
+                d_theta = (wavelength / (2.0 * np.pi * interferometer_spacing * max(1e-6, np.cos(ang_rad)))) * d_phi
+                dt_phi = t_twtt * np.tan(ang_rad) * d_theta
+                dt_phi_tot = np.sqrt(dt_phi ** 2 + (tau_eff ** 2 / 12.0))
 
-                qf_amp_linear = t_twtt / dt_amp_tot
-                QF_A = np.log10(max(1.0, qf_amp_linear))
+                qf_phi_linear = t_twtt / dt_phi_tot
+                QF_Phi = np.log10(max(1.0, qf_phi_linear))
 
-                # --- Estimator 2: Phase QF ---
-                QF_Phi = 0.0
-                if A_annulus < A_beam and snr_linear > 0.01:
-                    d_phi = np.sqrt(1.0 / (N_samples * snr_linear))
-                    d_theta = (wavelength / (2.0 * np.pi * interferometer_spacing * max(1e-6, np.cos(ang_rad)))) * d_phi
-                    dt_phi = t_twtt * np.tan(ang_rad) * d_theta
-                    dt_phi_tot = np.sqrt(dt_phi ** 2 + (tau_eff ** 2 / 12.0))
+            # --- Survival Equation ---
+            max_QF = max(QF_A, QF_Phi)
 
-                    qf_phi_linear = t_twtt / dt_phi_tot
-                    QF_Phi = np.log10(max(1.0, qf_phi_linear))
+            if snr_db > 5.0:
+                r_min = r_test
+            else:
+                r_max_test = r_test
 
-                # --- Survival Equation ---
-                max_QF = max(QF_A, QF_Phi)
-
-                if snr_db > 5.0:
-                    r_min = r_test
-                else:
-                    r_max_test = r_test
-
-            final_r = r_test
-            interp_r_max[idx] = 1.0 if final_r <= 1.5 else final_r
+        final_r = r_test
+        interp_r_max[idx] = 1.0 if final_r <= 1.5 else final_r
 
 
-    def generate_native_lobe(is_tx, color_scale, name, mode="Ghost"):
-        """Generates a mathematically pure 3D polar directivity pattern."""
-        # Dynamically center the grid on the steered beam
+    def generate_native_solid_lobe(is_tx, color_scale, name):
+        """Generates a geometrically pure, fixed 3D polar directivity pattern."""
         if is_tx:
             v_center = np.pi / 2 - tx_steer_rad
         else:
             v_center = np.pi / 2 - theta_rad
 
-        # Using odd numbers (151, 201) to ensure center point is sampled
         u = np.linspace(0, np.pi, 151)
         v = np.linspace(v_center - np.radians(45), v_center + np.radians(45), 201)
         U, V = np.meshgrid(u, v)
 
         if is_tx:
-            X_loc = np.cos(V)
-            Y_loc = np.sin(V) * np.cos(U)
-            Z_loc = np.sin(V) * np.sin(U)
+            X_loc, Y_loc, Z_loc = np.cos(V), np.sin(V) * np.cos(U), np.sin(V) * np.sin(U)
             R_mech = R_tx_mech
         else:
-            X_loc = np.sin(V) * np.cos(U)
-            Y_loc = np.cos(V)
-            Z_loc = np.sin(V) * np.sin(U)
+            X_loc, Y_loc, Z_loc = np.sin(V) * np.cos(U), np.cos(V), np.sin(V) * np.sin(U)
             R_mech = R_rx_mech
 
-            # Pre-allocate global drawing arrays
-        X_unit = np.zeros_like(X_loc)
-        Y_unit = np.zeros_like(X_loc)
-        Z_unit = np.zeros_like(X_loc)
-        R_linear = np.zeros_like(X_loc)
+        X_unit, Y_unit, Z_unit, R_linear = np.zeros_like(X_loc), np.zeros_like(X_loc), np.zeros_like(
+            X_loc), np.zeros_like(X_loc)
 
         for i in range(X_loc.shape[0]):
             for j in range(X_loc.shape[1]):
-                v_local = np.array([X_loc[i, j], Y_loc[i, j], Z_loc[i, j]])
+                v_geo = np.dot(R_mech, np.array([X_loc[i, j], Y_loc[i, j], Z_loc[i, j]]))
+                X_unit[i, j], Y_unit[i, j], Z_unit[i, j] = v_geo[0], v_geo[1], v_geo[2]
 
-                # Rotate the local mesh point into the global frame to apply pitch/roll
-                v_geo = np.dot(R_mech, v_local)
-                X_unit[i, j] = v_geo[0]
-                Y_unit[i, j] = v_geo[1]
-                Z_unit[i, j] = v_geo[2]
-
-                # Calculate directivity using the fixed global vector
                 if is_tx:
                     D = calculate_directivity(v_geo, R_tx_mech, tx_steer_actual_rad, is_tx=True)
                 else:
                     D = calculate_directivity(v_geo, R_rx_mech, theta_actual_rad, is_tx=False)
                 R_linear[i, j] = np.abs(D)
 
-        # Normalize and map to dB scale (-40dB Floor) for color and Solid mode
         R_dB = np.clip(20 * np.log10(R_linear + 1e-12), -40, 0)
-
-        # --- Choose radial scale based on physical mode ---
-        if mode == "Ghost":
-            R_shape = (R_dB + 40.0) / 40.0
-            if lobe_calc_mode == "Queried Beam Capacity":
-                R_final = R_shape * lobe_scale
-            else:
-                incidence_angles = np.arccos(np.clip(np.abs(Z_unit), 0.0, 1.0))
-                dynamic_lobe_scale = np.interp(incidence_angles, interp_angles_rad, interp_r_max)
-                R_final = R_shape * dynamic_lobe_scale
-            surface_opacity = 0.15
-
-        elif mode == "Solid":
-            # Uses linear-dB mapping so side lobes remain visually distinct. Theoretical pattern.
-            R_physical_radius = (R_dB + 40.0) / 40.0
-            R_final = R_physical_radius * depth
-            surface_opacity = 0.8
-
-        # Apply final calculated scale point-by-point
-        X_lobe = X_unit * R_final
-        Y_lobe = Y_unit * R_final
-        Z_lobe = Z_unit * R_final
+        R_physical_radius = (R_dB + 40.0) / 40.0
+        R_final = R_physical_radius * depth
 
         return go.Surface(
-            x=X_lobe, y=Y_lobe, z=Z_lobe,
-            surfacecolor=R_dB,  # Color map always remains in dB for contrast
-            colorscale=color_scale,
-            cmin=-40, cmax=0,
-            name=f"{name} ({mode})",
-            showscale=False,
-            opacity=surface_opacity
+            x=X_unit * R_final, y=Y_unit * R_final, z=Z_unit * R_final,
+            surfacecolor=R_dB, colorscale=color_scale, cmin=-40, cmax=0,
+            name=name, showscale=False, opacity=0.8
         )
 
-    # Add TX Traces
-    if show_tx_solid:
-        fig.add_trace(generate_native_lobe(is_tx=True, color_scale='Blues', name='TX Lobe', mode="Solid"))
-    if show_tx_ghost:
-        fig.add_trace(generate_native_lobe(is_tx=True, color_scale='Blues', name='TX Lobe', mode="Ghost"))
 
-    # Add RX Traces
-    if show_rx_solid:
-        fig.add_trace(generate_native_lobe(is_tx=False, color_scale='Reds', name='RX Lobe', mode="Solid"))
-    if show_rx_ghost:
-        fig.add_trace(generate_native_lobe(is_tx=False, color_scale='Reds', name='RX Lobe', mode="Ghost"))
-
-
-    def generate_combined_lobe(mode="Ghost"):
-        """Generates the mathematically pure combined beam."""
-
+    def generate_combined_solid_lobe():
+        """Generates the mathematically pure combined geometry beam."""
         beam_vec = pt_physical / np.linalg.norm(pt_physical)
         azimuth_center = np.arctan2(beam_vec[1], beam_vec[0])
         elevation_center = np.arccos(beam_vec[2])
@@ -1477,9 +1537,7 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
         v_comb = np.linspace(max(0, elevation_center - span), min(np.pi / 2, elevation_center + span), 81)
         U_comb, V_comb = np.meshgrid(u_comb, v_comb)
 
-        X_comb = np.sin(V_comb) * np.cos(U_comb)
-        Y_comb = np.sin(V_comb) * np.sin(U_comb)
-        Z_comb = np.cos(V_comb)
+        X_comb, Y_comb, Z_comb = np.sin(V_comb) * np.cos(U_comb), np.sin(V_comb) * np.sin(U_comb), np.cos(V_comb)
         R_comb_linear = np.zeros_like(X_comb)
 
         for i in range(X_comb.shape[0]):
@@ -1489,39 +1547,187 @@ if (show_tx_solid or show_tx_ghost or show_rx_solid or show_rx_ghost or show_com
                 D_rx = calculate_directivity(v_geo, R_rx_mech, theta_actual_rad, is_tx=False)
                 R_comb_linear[i, j] = np.abs(D_tx * D_rx)
 
-        # Normalize to full dB scale
         R_dB = np.clip(20 * np.log10(R_comb_linear + 1e-12), -40, 0)
+        R_final = ((R_dB + 40.0) / 40.0) * depth
 
-        if mode == "Ghost":
-            R_shape = (R_dB + 40.0) / 40.0
-            if lobe_calc_mode == "Queried Beam Capacity":
-                R_final = R_shape * lobe_scale
-            else:
-                incidence_angles = np.arccos(np.clip(np.abs(Z_comb), 0.0, 1.0))
-                dynamic_lobe_scale = np.interp(incidence_angles, interp_angles_rad, interp_r_max)
-                R_final = R_shape * dynamic_lobe_scale
-            surface_opacity = 0.25
+        return go.Surface(
+            x=X_comb * R_final, y=Y_comb * R_final, z=Z_comb * R_final,
+            surfacecolor=R_dB, colorscale='Viridis', cmin=-40, cmax=0,
+            name='Combined Lobe', showscale=False, opacity=0.85
+        )
 
-        elif mode == "Solid":
-            # Polar plot scale
-            R_radius = (R_dB + 40.0) / 40.0
-            R_final = R_radius * depth
-            surface_opacity = 0.85
 
-        X_final = X_comb * R_final
-        Y_final = Y_comb * R_final
-        Z_final = Z_comb * R_final
+    # --- System Detection Limits ---
+    def generate_queried_beam_limit():
+        """Generates the isolated, dynamic detection bubble for the steered beam."""
+        beam_vec = pt_physical / np.linalg.norm(pt_physical)
+        azimuth_center = np.arctan2(beam_vec[1], beam_vec[0])
+        elevation_center = np.arccos(beam_vec[2])
+
+        span = np.radians(10.0)
+        u_comb = np.linspace(azimuth_center - span, azimuth_center + span, 81)
+        v_comb = np.linspace(max(0, elevation_center - span), min(np.pi / 2, elevation_center + span), 81)
+        U_comb, V_comb = np.meshgrid(u_comb, v_comb)
+
+        X_comb, Y_comb, Z_comb = np.sin(V_comb) * np.cos(U_comb), np.sin(V_comb) * np.sin(U_comb), np.cos(V_comb)
+        X_final, Y_final, Z_final = np.zeros_like(X_comb), np.zeros_like(X_comb), np.zeros_like(X_comb)
+
+        # Use slope tangents for algebraic intersection
+        sl_x = np.tan(np.radians(sf_slope_y))
+        sl_y = np.tan(np.radians(sf_slope_x))
+
+        for i in range(X_comb.shape[0]):
+            for j in range(X_comb.shape[1]):
+                v_geo = np.array([X_comb[i, j], Y_comb[i, j], Z_comb[i, j]])
+
+                D_tx = calculate_directivity(v_geo, R_tx_mech, tx_steer_actual_rad, is_tx=True)
+                D_rx = calculate_directivity(v_geo, R_rx_mech, theta_actual_rad, is_tx=False)
+
+                D_dB = np.clip(20 * np.log10(np.abs(D_tx * D_rx) + 1e-12), -40, 0)
+                R_shape = (D_dB + 40.0) / 40.0
+
+                # --- 3D Incidence Angle and Acoustic Detection Bounding ---
+                cos_inc = np.dot(-v_geo, surface_normal)
+                inc_angle = np.arccos(np.clip(cos_inc, 0.0, 1.0))
+                r_max = np.interp(inc_angle, interp_angles_rad, interp_r_max)
+
+                # Acoustic limit I'm referring to as a "balloon"
+                R_balloon = R_shape * r_max
+
+                # Calculate distance to sloped seafloor
+                denom = v_geo[2] + v_geo[0] * sl_x + v_geo[1] * sl_y
+                r_bottom = depth / denom if denom > 1e-6 else 20000.0
+
+                # Clip at seafloor
+                R_final = min(R_balloon, r_bottom)
+
+                X_final[i, j] = v_geo[0] * R_final
+                Y_final[i, j] = v_geo[1] * R_final
+                Z_final[i, j] = v_geo[2] * R_final
 
         return go.Surface(
             x=X_final, y=Y_final, z=Z_final,
-            surfacecolor=R_dB, colorscale='Viridis', cmin=-40, cmax=0,
-            name=f'Combined Lobe ({mode})', showscale=False, opacity=surface_opacity
+            surfacecolor=Z_final, colorscale='Magma', showscale=False, opacity=0.4,
+            name='Queried Beam Detection Limit'
         )
 
-    if show_combined_solid:
-        fig.add_trace(generate_combined_lobe(mode="Solid"))
-    if show_combined_ghost:
-        fig.add_trace(generate_combined_lobe(mode="Ghost"))
+
+    def generate_swath_envelope():
+        """Generates a 3D volume of the detection envelope, clipped by the physical seafloor when applicable."""
+        max_across_rad = np.radians(tx_across_fan_bw / 2.0)
+        max_along_rad = rx_acceptance_rad
+
+        sl_x = np.tan(np.radians(sf_slope_y))
+        sl_y = np.tan(np.radians(sf_slope_x))
+
+        traces = []
+
+        # --- Max detection boundary surface ---
+        grid_across = np.linspace(-max_across_rad, max_across_rad, 100)
+        grid_along = np.linspace(-max_along_rad, max_along_rad, 25)
+        U_cap, V_cap = np.meshgrid(grid_along, grid_across)
+
+        X_cap = np.zeros_like(U_cap)
+        Y_cap = np.zeros_like(U_cap)
+        Z_cap = np.zeros_like(U_cap)
+
+        for i in range(U_cap.shape[0]):
+            for j in range(U_cap.shape[1]):
+                x_loc = np.sin(U_cap[i, j])
+                y_loc = np.sin(V_cap[i, j]) * np.cos(U_cap[i, j])
+                z_loc = np.cos(V_cap[i, j]) * np.cos(U_cap[i, j])
+
+                v_local = np.array([x_loc, y_loc, z_loc])
+                v_local = v_local / np.linalg.norm(v_local)
+                v_geo = np.dot(R_rx_mech, v_local)
+
+                # Calculate distance to seafloor
+                denom = v_geo[2] + v_geo[0] * sl_x + v_geo[1] * sl_y
+                r_bottom = depth / denom if denom > 1e-6 else 20000.0
+
+                # Calculate detection limit
+                cos_inc = np.dot(-v_geo, surface_normal)
+                inc_angle = np.arccos(np.clip(cos_inc, 0.0, 1.0))
+                r_max = np.interp(inc_angle, interp_angles_rad, interp_r_max)
+
+                # Draw shorter of the two
+                r_draw = min(r_max, r_bottom)
+
+                X_cap[i, j] = v_geo[0] * r_draw
+                Y_cap[i, j] = v_geo[1] * r_draw
+                Z_cap[i, j] = v_geo[2] * r_draw
+
+        traces.append(go.Surface(
+            x=X_cap, y=Y_cap, z=Z_cap,
+            surfacecolor=Z_cap, colorscale='Purples', showscale=False, opacity=0.45,
+            name='Detection Envelope Cap'
+        ))
+
+        # --- Swath volume lateral boundaries ---
+        N_edge = 40
+        edge_fwd_ac = np.linspace(-max_across_rad, max_across_rad, N_edge)
+        edge_fwd_al = np.full(N_edge, max_along_rad)
+
+        edge_stbd_ac = np.full(N_edge, max_across_rad)
+        edge_stbd_al = np.linspace(max_along_rad, -max_along_rad, N_edge)
+
+        edge_aft_ac = np.linspace(max_across_rad, -max_across_rad, N_edge)
+        edge_aft_al = np.full(N_edge, -max_along_rad)
+
+        edge_port_ac = np.full(N_edge, -max_across_rad)
+        edge_port_al = np.linspace(-max_along_rad, max_along_rad, N_edge)
+
+        peri_across = np.concatenate([edge_fwd_ac, edge_stbd_ac, edge_aft_ac, edge_port_ac])
+        peri_along = np.concatenate([edge_fwd_al, edge_stbd_al, edge_aft_al, edge_port_al])
+
+        r_scales = np.linspace(0.0, 1.0, 15)
+
+        X_walls = np.zeros((len(peri_across), len(r_scales)))
+        Y_walls = np.zeros_like(X_walls)
+        Z_walls = np.zeros_like(X_walls)
+        C_walls = np.zeros_like(X_walls)
+
+        for i in range(len(peri_across)):
+            x_loc = np.sin(peri_along[i])
+            y_loc = np.sin(peri_across[i]) * np.cos(peri_along[i])
+            z_loc = np.cos(peri_across[i]) * np.cos(peri_along[i])
+
+            v_local = np.array([x_loc, y_loc, z_loc])
+            v_local = v_local / np.linalg.norm(v_local)
+            v_geo = np.dot(R_rx_mech, v_local)
+
+            denom = v_geo[2] + v_geo[0] * sl_x + v_geo[1] * sl_y
+            r_bottom = depth / denom if denom > 1e-6 else 20000.0
+
+            cos_inc = np.dot(-v_geo, surface_normal)
+            inc_angle = np.arccos(np.clip(cos_inc, 0.0, 1.0))
+            r_max = np.interp(inc_angle, interp_angles_rad, interp_r_max)
+
+            r_draw = min(r_max, r_bottom)
+
+            for j in range(len(r_scales)):
+                scale = r_scales[j]
+                X_walls[i, j] = v_geo[0] * r_draw * scale
+                Y_walls[i, j] = v_geo[1] * r_draw * scale
+                Z_walls[i, j] = v_geo[2] * r_draw * scale
+                C_walls[i, j] = scale
+
+        traces.append(go.Surface(
+            x=X_walls, y=Y_walls, z=Z_walls,
+            surfacecolor=C_walls,
+            colorscale=[[0, 'rgba(128, 0, 128, 0.1)'], [1, 'rgba(128, 0, 128, 0.25)']],
+            showscale=False, opacity=0.99,
+            name='Detection Envelope Walls'
+        ))
+
+        return traces
+
+    # --- Add activated traces ---
+    if show_tx_solid: fig.add_trace(generate_native_solid_lobe(is_tx=True, color_scale='Blues', name='TX Lobe'))
+    if show_rx_solid: fig.add_trace(generate_native_solid_lobe(is_tx=False, color_scale='Reds', name='RX Lobe'))
+    if show_combined_solid: fig.add_trace(generate_combined_solid_lobe())
+    if show_queried_beam_limit: fig.add_trace(generate_queried_beam_limit())
+    if show_total_swath_envelope: fig.add_traces(generate_swath_envelope())
 
 # Add Actual TX Footprint
 if show_actual_tx:
@@ -1563,27 +1769,37 @@ if show_rx_listening_env:
     Z_carpet = np.zeros_like(THETA)
     C_carpet = np.zeros_like(THETA)
 
+    # Grab slope tangents for the raycast
+    sl_x = np.tan(np.radians(sf_slope_y))
+    sl_y = np.tan(np.radians(sf_slope_x))
+
     for i in range(THETA.shape[0]):
         for j in range(THETA.shape[1]):
             t_val = THETA[i, j]
             p_val = PHI[i, j]
 
-            # Generate the ray and project it to the seafloor
+            # Generate the ray
             ray_local = make_rx_ray(t_val, p_val)
-            pt = project_to_flat_bottom(np.dot(R_rx_mech, ray_local).flatten())
+            v_geo = np.dot(R_rx_mech, ray_local).flatten()
 
-            X_carpet[i, j] = pt[0]
-            Y_carpet[i, j] = pt[1]
-            Z_carpet[i, j] = pt[2]
+            # --- Algebraic Intersection ---
+            denom = v_geo[2] + v_geo[0] * sl_x + v_geo[1] * sl_y
 
-            # Calculate 2D Acoustic Taper
-            # Along-track fade: Cosine taper down to the acceptance limits
+            if denom > 1e-6:
+                # Ray hits bottom
+                r_bottom = depth / denom
+                X_carpet[i, j] = v_geo[0] * r_bottom
+                Y_carpet[i, j] = v_geo[1] * r_bottom
+                Z_carpet[i, j] = v_geo[2] * r_bottom
+            else:
+                # The ray does not hit bottom within bounds
+                X_carpet[i, j] = np.nan
+                Y_carpet[i, j] = np.nan
+                Z_carpet[i, j] = np.nan
+
+            # Calculate taper
             fade_along = np.cos((np.pi / 2.0) * (p_val / rx_acceptance_rad))
-
-            # Across-track fade: Sensitivity drops naturally as projection area shrinks (~cos of angle)
             fade_across = np.cos(t_val)
-
-            # Combine them for a smooth decay envelope
             C_carpet[i, j] = max(0.0, fade_along * fade_across)
 
     fade_green_scale = [
@@ -1723,19 +1939,19 @@ for i, ang in enumerate(ref_angles):
     sin_grid_tx = np.sin(sec_steer_rad) * (c_sound / assumed_sv)
     grid_tx_actual_rad = np.arcsin(sin_grid_tx) if abs(sin_grid_tx) <= 1.0 else sec_steer_rad
 
-    # Calculate exactly where this mechanical reference beam strikes the 3D seafloor
-    # using the mechanical rotation matrices (R_tx_mech, R_rx_mech)
+    # Calculate exactly where this mechanical reference beam hits the 3D seafloor using the mechanical rotation matrices (R_tx_mech, R_rx_mech)
     pt_grid = solve_mills_cross_intersection(R_tx_mech, R_rx_mech, grid_tx_actual_rad, grid_rx_actual_rad, depth)
 
     if np.linalg.norm(pt_grid) > 0:
         x_rot = pt_grid[0]
         y_rot = pt_grid[1]
+        z_rot = pt_grid[2]
     else:
-        x_rot, y_rot = 0, 0
+        x_rot, y_rot, z_rot = 0, 0, depth
 
-    # Draw the gray reference line
+    # Draw gray reference line
     fig.add_trace(go.Scatter3d(
-        x=[0, x_rot], y=[0, y_rot], z=[0, depth],
+        x=[0, x_rot], y=[0, y_rot], z=[0, z_rot],
         mode='lines',
         line=dict(color='gray', width=2, dash='dot'),
         hoverinfo='none',
@@ -1743,9 +1959,9 @@ for i, ang in enumerate(ref_angles):
         name='Array-Relative Angle Grid'
     ))
 
-    # Add text labels at the seafloor intersection points
+    # Add text labels at seafloor intersection points
     fig.add_trace(go.Scatter3d(
-        x=[x_rot], y=[y_rot], z=[depth],
+        x=[x_rot], y=[y_rot], z=[z_rot],
         mode='text',
         text=[f"{ang}°"],
         textposition="bottom center",
