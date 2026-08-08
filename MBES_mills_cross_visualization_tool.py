@@ -1474,7 +1474,7 @@ if (show_tx_solid or show_rx_solid or show_combined_solid or show_queried_beam_l
             # --- Survival Equation ---
             max_QF = max(QF_A, QF_Phi)
 
-            if snr_db > 5.0:
+            if snr_db > 5.0 and max_QF >= 2.5:
                 r_min = r_test
             else:
                 r_max_test = r_test
