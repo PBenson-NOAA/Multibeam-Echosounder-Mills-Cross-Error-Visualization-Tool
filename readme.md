@@ -45,6 +45,6 @@ This is an approximation which is again made to make the tool a tiny bit faster,
 
 **Matched Filter:** The current implementation of the matched filter assumes a 100% efficiency in the correlation.
 If FM pulse is selected (Time-Bandwidth product > 1.5)m the script add the following to the sonar equation (per A.D. Waite, 1996):
-PG = 10log10(BW)
+PG = 10log10(tau*BW)
 
 **Motion and Alignment:** The IMU is assumed to produce perfect results and that it is already corrected for latency. Additionally, the sonar array is assumed to have lever arm offsets perfectly accounted for and that it is perfectly compensated for angular offsets unless the user introduces mounting errors.
